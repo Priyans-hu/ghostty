@@ -65,6 +65,7 @@ class TerminalWindow: NSWindow {
             guard tabColor != oldValue else { return }
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
             invalidateRestorableState()
+            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
         }
     }
 
@@ -255,6 +256,12 @@ class TerminalWindow: NSWindow {
         // it. This has been verified to work on macOS 12 to 26
         if isTabBar(childViewController) {
             childViewController.identifier = Self.tabBarIdentifier
+
+            // The vertical tab sidebar replaces the native tab bar. Hiding the controller
+            // gives the bar no room in the titlebar and hiding its view stops it drawing.
+            childViewController.isHidden = true
+            childViewController.view.isHidden = true
+
             tabBarDidAppear()
         }
     }
@@ -398,6 +405,10 @@ class TerminalWindow: NSWindow {
             /// Check ``titlebarFont`` down below
             /// to see why we need to check `hasMoreThanOneTabs` here
             titlebarTextField?.usesSingleLineMode = !hasMoreThanOneTabs
+
+            if title != oldValue {
+                NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+            }
         }
     }
 
