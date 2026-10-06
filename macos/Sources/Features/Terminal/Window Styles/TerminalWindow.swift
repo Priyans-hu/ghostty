@@ -50,6 +50,15 @@ class TerminalWindow: NSWindow {
         true
     }
 
+    /// Whether this window draws its tabs in the titlebar. Those windows never show the
+    /// vertical tab sidebar, so tabs are never listed twice.
+    var hostsTitlebarTabs: Bool { false }
+
+    /// Whether the vertical tab sidebar replaces the native tab bar in this window.
+    var showsTabSidebar: Bool {
+        TerminalTabSidebar.isEnabled && !hostsTitlebarTabs
+    }
+
     /// Glass effect view for liquid glass background when transparency is enabled
     private var glassEffectView: NSView?
 
@@ -94,6 +103,14 @@ class TerminalWindow: NSWindow {
             guard let self, let menu = n.object as? NSMenu else { return }
             self.configureTabContextMenuIfNeeded(menu)
         }
+
+        // Show or hide the native tab bar when vertical tabs are toggled.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(tabSidebarDidToggle(_:)),
+            name: .terminalTabSidebarDidToggle,
+            object: nil
+        )
 
         // This is required so that window restoration properly creates our tabs
         // again. I'm not sure why this is required. If you don't do this, then
@@ -230,7 +247,9 @@ class TerminalWindow: NSWindow {
 
     @objc private func renameTabFromContextMenu(_ sender: NSMenuItem) {
         let targetWindow = sender.representedObject as? NSWindow ?? self
-        if beginInlineTabTitleEdit(for: targetWindow) {
+
+        // Inline editing happens in the native tab bar, which the sidebar hides.
+        if !showsTabSidebar, beginInlineTabTitleEdit(for: targetWindow) {
             return
         }
 
@@ -256,13 +275,21 @@ class TerminalWindow: NSWindow {
         // it. This has been verified to work on macOS 12 to 26
         if isTabBar(childViewController) {
             childViewController.identifier = Self.tabBarIdentifier
-
-            // The vertical tab sidebar replaces the native tab bar. Hiding the controller
-            // gives the bar no room in the titlebar and hiding its view stops it drawing.
-            childViewController.isHidden = true
-            childViewController.view.isHidden = true
-
+            syncTabBarHidden(childViewController)
             tabBarDidAppear()
+        }
+    }
+
+    /// Hides the native tab bar while the vertical tab sidebar replaces it. Hiding the
+    /// controller gives the bar no room in the titlebar and hiding its view stops it drawing.
+    private func syncTabBarHidden(_ childViewController: NSTitlebarAccessoryViewController) {
+        childViewController.isHidden = showsTabSidebar
+        childViewController.view.isHidden = showsTabSidebar
+    }
+
+    @objc private func tabSidebarDidToggle(_ notification: Notification) {
+        for childViewController in titlebarAccessoryViewControllers where isTabBar(childViewController) {
+            syncTabBarHidden(childViewController)
         }
     }
 
@@ -745,6 +772,41 @@ extension TerminalWindow {
         }
 
         appendTabModifierSection(to: menu, target: targetController)
+    }
+
+    /// The vertical tab sidebar's menu for a tab: the native tab bar's menu (AppKit's items
+    /// plus the ones `configureTabContextMenuIfNeeded` adds) with the same order, titles, and icons.
+    func makeTabContextMenu(for target: TerminalController) -> NSMenu {
+        let menu = NSMenu()
+
+        // AppKit validates the native menu itself, so set the same enabled states directly.
+        menu.autoenablesItems = false
+
+        let tabWindow = target.window
+        let tabs = tabWindow?.tabGroup?.windows ?? []
+        let index = tabWindow.flatMap { tabs.firstIndex(of: $0) } ?? 0
+
+        func addItem(_ title: String, action: Selector, target: AnyObject?, symbol: String?, isEnabled: Bool) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            item.isEnabled = isEnabled
+            if let symbol { item.setImageIfDesired(systemSymbolName: symbol) }
+            menu.addItem(item)
+        }
+
+        addItem("Close Tab", action: #selector(TerminalController.closeTab(_:)),
+                target: target, symbol: "xmark", isEnabled: true)
+        addItem("Close Other Tabs", action: #selector(TerminalController.closeOtherTabs(_:)),
+                target: target, symbol: "xmark", isEnabled: tabs.count > 1)
+        addItem("Close Tabs to the Right", action: #selector(TerminalController.closeTabsOnTheRight(_:)),
+                target: target, symbol: "xmark", isEnabled: index < tabs.count - 1)
+        addItem("Move Tab to New Window", action: #selector(NSWindow.moveTabToNewWindow(_:)),
+                target: tabWindow, symbol: "macwindow.badge.plus", isEnabled: tabs.count > 1)
+        addItem("Show All Tabs", action: #selector(NSWindow.toggleTabOverview(_:)),
+                target: tabWindow, symbol: nil, isEnabled: true)
+
+        appendTabModifierSection(to: menu, target: target)
+        return menu
     }
 
     private func isTabContextMenu(_ menu: NSMenu) -> Bool {

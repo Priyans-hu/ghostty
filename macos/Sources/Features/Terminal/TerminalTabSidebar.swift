@@ -5,6 +5,9 @@ extension Notification.Name {
     /// Posted when the tabs of any terminal window may have changed: their order, titles,
     /// colors, key equivalents, or which one is selected.
     static let terminalTabsDidChange = Notification.Name("com.mitchellh.ghostty.terminalTabsDidChange")
+
+    /// Posted when View > Vertical Tabs switches between the sidebar and the native tab bar.
+    static let terminalTabSidebarDidToggle = Notification.Name("com.mitchellh.ghostty.terminalTabSidebarDidToggle")
 }
 
 /// The tabs of one terminal window's tab group, as listed by the vertical tab sidebar.
@@ -87,6 +90,11 @@ final class TerminalTabSidebarModel: ObservableObject {
         (window?.windowController as? TerminalController)?.newTab(nil)
     }
 
+    /// Windows that draw their tabs in the titlebar never show the sidebar.
+    var supportsSidebar: Bool {
+        !((window as? TerminalWindow)?.hostsTitlebarTabs ?? false)
+    }
+
     func select(_ tab: Tab) {
         tabWindow(for: tab)?.makeKeyAndOrderFront(nil)
     }
@@ -95,14 +103,10 @@ final class TerminalTabSidebarModel: ObservableObject {
         controller(for: tab)?.closeTab(nil)
     }
 
-    func closeOthers(_ tab: Tab) {
-        select(tab)
-        controller(for: tab)?.closeOtherTabs(nil)
-    }
-
-    func promptTitle(_ tab: Tab) {
-        select(tab)
-        controller(for: tab)?.promptTabTitle()
+    /// The same menu the native tab bar shows when the tab is right-clicked.
+    func contextMenu(for tab: Tab) -> NSMenu? {
+        guard let controller = controller(for: tab) else { return nil }
+        return (window as? TerminalWindow)?.makeTabContextMenu(for: controller)
     }
 
     private func tabWindow(for tab: Tab) -> NSWindow? {
@@ -120,6 +124,7 @@ struct TerminalTabSidebarLayout<Content: View>: View {
     @ObservedObject var ghostty: Ghostty.App
     let content: Content
 
+    @AppStorage(TerminalTabSidebar.enabledKey) private var isEnabled = true
     @AppStorage(TerminalTabSidebar.collapsedKey) private var isCollapsed = false
     @AppStorage(TerminalTabSidebar.widthKey) private var width = TerminalTabSidebar.defaultWidth
 
@@ -134,12 +139,16 @@ struct TerminalTabSidebarLayout<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
-                .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
-                .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
-                .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
+            // The content stays in the same slot either way, so toggling vertical
+            // tabs doesn't recreate the terminal view.
+            if isEnabled && model.supportsSidebar {
+                TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
+                    .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
+                    .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
+                    .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
 
-            divider
+                divider
+            }
 
             content
         }
@@ -183,12 +192,18 @@ struct TerminalTabSidebarLayout<Content: View>: View {
 
 /// The vertical list of a terminal window's tabs, replacing the native tab bar.
 struct TerminalTabSidebar: View {
+    static let enabledKey = "TerminalTabSidebarEnabled"
     static let collapsedKey = "TerminalTabSidebarCollapsed"
     static let widthKey = "TerminalTabSidebarWidth"
     static let defaultWidth: Double = 200
     static let widthRange: ClosedRange<Double> = 120...400
     static let collapsedWidth: Double = 40
     static let dividerWidth: Double = 1
+
+    /// Whether vertical tabs are on (View > Vertical Tabs). On by default.
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
+    }
 
     /// The width the sidebar and its divider currently take out of a window's content.
     static var occupiedWidth: CGFloat {
@@ -392,12 +407,7 @@ private struct TerminalTabSidebarRow: View {
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
             .help(isCompact ? tab.title : "")
-            .contextMenu {
-                Button("Close Tab") { model.close(tab) }
-                Button("Close Other Tabs") { model.closeOthers(tab) }
-                Divider()
-                Button("Change Tab Title...") { model.promptTitle(tab) }
-            }
+            .overlay(TerminalTabSidebarContextMenu { model.contextMenu(for: tab) })
             .accessibilityElement(children: .combine)
             .accessibilityLabel(tab.title)
             .accessibilityAddTraits(tab.isSelected ? [.isButton, .isSelected] : .isButton)
@@ -464,5 +474,61 @@ private struct TerminalTabSidebarRow: View {
         .padding(.leading, 4)
         .padding(.trailing, 10)
         .frame(height: 28)
+    }
+}
+
+/// Shows an AppKit menu on right-click or control-click and lets every other mouse
+/// event through to the SwiftUI view underneath. A SwiftUI context menu can't host the
+/// tab color palette, which is an NSView.
+private struct TerminalTabSidebarContextMenu: NSViewRepresentable {
+    let makeMenu: () -> NSMenu?
+
+    func makeNSView(context: Context) -> MenuView {
+        MenuView()
+    }
+
+    func updateNSView(_ view: MenuView, context: Context) {
+        view.makeMenu = makeMenu
+    }
+
+    final class MenuView: NSView {
+        var makeMenu: (() -> NSMenu?)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent else { return nil }
+            let isContextClick = event.type == .rightMouseDown ||
+                (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+            return isContextClick ? super.hitTest(point) : nil
+        }
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            makeMenu?()
+        }
+    }
+}
+
+/// The View > Vertical Tabs menu item, which switches every window between the tab
+/// sidebar and the native tab bar.
+final class TerminalTabSidebarMenu: NSObject, NSMenuItemValidation {
+    private static let shared = TerminalTabSidebarMenu()
+
+    /// Adds the item to the top of the View menu. Call once at launch.
+    static func install() {
+        guard let viewMenu = NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "View" })?.submenu else { return }
+
+        let item = NSMenuItem(title: "Vertical Tabs", action: #selector(TerminalTabSidebarMenu.toggle(_:)), keyEquivalent: "")
+        item.target = shared
+        viewMenu.insertItem(item, at: 0)
+        viewMenu.insertItem(.separator(), at: 1)
+    }
+
+    @objc private func toggle(_ sender: Any?) {
+        UserDefaults.standard.set(!TerminalTabSidebar.isEnabled, forKey: TerminalTabSidebar.enabledKey)
+        NotificationCenter.default.post(name: .terminalTabSidebarDidToggle, object: nil)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.state = TerminalTabSidebar.isEnabled ? .on : .off
+        return true
     }
 }
