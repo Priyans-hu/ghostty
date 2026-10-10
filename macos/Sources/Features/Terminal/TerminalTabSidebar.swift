@@ -164,12 +164,11 @@ final class TerminalTabSidebarModel: ObservableObject {
         let config = (window?.windowController as? BaseTerminalController)?.ghostty.config
         let newTabs = tabWindows.enumerated().map { offset, tabWindow in
             let index = offset + 1
-            let shortcut = index <= 9 ? config?.keyboardShortcut(for: "goto_tab:\(index)") : nil
             return Tab(
                 id: ObjectIdentifier(tabWindow),
                 index: index,
                 title: tabWindow.title,
-                keyEquivalent: shortcut.map { "\($0)" },
+                keyEquivalent: config.flatMap { TerminalController.tabKeyEquivalent(at: index, config: $0) },
                 color: (tabWindow as? TerminalWindow)?.tabColor ?? .none,
                 // Our window is only on screen while it is the selected tab.
                 isSelected: tabWindow === window
@@ -259,12 +258,10 @@ final class TerminalTabSidebarModel: ObservableObject {
             self?.promptTitle(tab)
         })
 
-        let palette = NSHostingView(rootView: TabColorMenuView(selectedColor: tab.color) { [weak self] color in
-            self?.setColor(color, for: tab)
-        })
-        palette.frame.size = palette.intrinsicContentSize
         let paletteItem = NSMenuItem()
-        paletteItem.view = palette
+        paletteItem.view = makeTabColorPaletteView(selectedColor: tab.color) { [weak self] color in
+            self?.setColor(color, for: tab)
+        }
         menu.addItem(paletteItem)
 
         return menu

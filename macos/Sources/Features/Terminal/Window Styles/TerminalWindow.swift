@@ -880,7 +880,7 @@ extension TerminalWindow {
     }
 }
 
-private func makeTabColorPaletteView(
+func makeTabColorPaletteView(
     selectedColor: TerminalTabColor,
     selectionHandler: @escaping (TerminalTabColor) -> Void
 ) -> NSView {

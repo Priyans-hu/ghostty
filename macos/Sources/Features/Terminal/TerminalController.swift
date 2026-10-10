@@ -603,24 +603,23 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         if let windows = window?.tabbedWindows as? [TerminalWindow] {
             for (tab, window) in zip(1..., windows) {
-                // We need to clear any windows beyond this because they have had
-                // a keyEquivalent set previously.
-                guard tab <= 9 else {
-                    window.keyEquivalent = ""
-                    continue
-                }
-
-                if let equiv = ghostty.config.keyboardShortcut(for: "goto_tab:\(tab)") {
-                    window.keyEquivalent = "\(equiv)"
-                } else {
-                    window.keyEquivalent = ""
-                }
+                // We need to clear tabs without a shortcut, such as those beyond
+                // the ninth, because they may have had a keyEquivalent set previously.
+                window.keyEquivalent = Self.tabKeyEquivalent(at: tab, config: ghostty.config) ?? ""
             }
         }
 
         if (window as? TerminalWindow)?.showsTabSidebar == true {
             NotificationCenter.default.post(name: .terminalTabsDidChange, object: window)
         }
+    }
+
+    /// The label for the keyboard shortcut that selects the tab at the given 1-based
+    /// position, from its `goto_tab` keybind. Only the first nine tabs can have one.
+    static func tabKeyEquivalent(at position: Int, config: Ghostty.Config) -> String? {
+        guard position <= 9,
+              let equiv = config.keyboardShortcut(for: "goto_tab:\(position)") else { return nil }
+        return "\(equiv)"
     }
 
     private func fixTabBar() {
