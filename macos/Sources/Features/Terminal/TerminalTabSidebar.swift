@@ -207,10 +207,42 @@ final class TerminalTabSidebarModel: ObservableObject {
     }
 
     func refresh() {
+        // A tab that moves leaves the tab group and joins it again, so until the move is
+        // done the group lists it in passing positions or not at all.
+        if groupState?.isMovingTab == true { return }
+
+        let newTabs = makeTabs(for: tabWindows)
+
+        // The tab whose title is being edited is gone, such as when it was closed or
+        // moved to another window, so there is nothing to commit the edit to.
+        if let renamingTabID, !newTabs.contains(where: { $0.id == renamingTabID }) {
+            finishRename(commit: false)
+        }
+
+        guard newTabs != tabs else { return }
+        setTabs(newTabs)
+    }
+
+    /// Lists the given tabs. On screen, the list keeps the selected tab in view when tabs
+    /// are added, such as a new tab that the tab group only lists once it settles, and when
+    /// the selected tab moves. Closing other tabs doesn't scroll the list back to the
+    /// selected tab, which would be in the way of closing more.
+    private func setTabs(_ newTabs: [Tab]) {
+        let isTabAdded = newTabs.count > tabs.count
+        let isSelectedTabMoved = newTabs.count == tabs.count
+            && newTabs.firstIndex(where: \.isSelected) != tabs.firstIndex(where: \.isSelected)
+        tabs = newTabs
+        if (isTabAdded || isSelectedTabMoved) && isSelectedTab {
+            revealCount += 1
+        }
+    }
+
+    /// The tabs listed for the given windows of our tab group, in the order given.
+    private func makeTabs(for windows: [NSWindow]) -> [Tab] {
         // The window only carries a key equivalent label while it is in a tab group, so a
         // lone tab would have none. Look the shortcuts up from the keybinds instead.
         let config = (window?.windowController as? BaseTerminalController)?.ghostty.config
-        let newTabs = tabWindows.enumerated().map { offset, tabWindow in
+        return windows.enumerated().map { offset, tabWindow in
             let index = offset + 1
             return Tab(
                 id: ObjectIdentifier(tabWindow),
@@ -221,23 +253,6 @@ final class TerminalTabSidebarModel: ObservableObject {
                 // Our window is only on screen while it is the selected tab.
                 isSelected: tabWindow === window
             )
-        }
-
-        // The tab whose title is being edited is gone, such as when it was closed or
-        // moved to another window, so there is nothing to commit the edit to.
-        if let renamingTabID, !newTabs.contains(where: { $0.id == renamingTabID }) {
-            finishRename(commit: false)
-        }
-
-        guard newTabs != tabs else { return }
-
-        // Keep the selected tab in view when tabs are added on screen, such as a new tab
-        // that the tab group only lists once it settles. Closing other tabs doesn't scroll
-        // the list back to the selected tab, which would be in the way of closing more.
-        let isTabAdded = newTabs.count > tabs.count
-        tabs = newTabs
-        if isTabAdded && isSelectedTab {
-            revealCount += 1
         }
     }
 
@@ -290,6 +305,69 @@ final class TerminalTabSidebarModel: ObservableObject {
 
     func showAllTabs() {
         window?.toggleTabOverview(nil)
+    }
+
+    /// Whether tabs can be moved by dragging their rows. Not while a title is being edited,
+    /// and not in fullscreen: a tab moves by leaving the tab group and joining it again,
+    /// which could take its window out of the fullscreen space.
+    var canReorderTabs: Bool {
+        guard tabs.count > 1, renamingTabID == nil, let window else { return false }
+        let fullscreenStyle = (window.windowController as? BaseTerminalController)?.fullscreenStyle
+        return !window.styleMask.contains(.fullScreen) && !(fullscreenStyle?.isFullscreen ?? false)
+    }
+
+    /// Moves a tab to the given 0-based position, the way the move_tab action does. The new
+    /// order is listed right away and kept while the tab group catches up.
+    func move(_ tab: Tab, to destination: Int) {
+        guard canReorderTabs,
+              let window,
+              let tabGroup = window.tabGroup,
+              let groupState,
+              let moving = tabWindow(for: tab)
+        else { return }
+
+        let windows = tabGroup.windows
+        guard let source = windows.firstIndex(of: moving),
+              windows.indices.contains(destination),
+              destination != source
+        else { return }
+
+        var reordered = windows
+        reordered.insert(reordered.remove(at: source), at: destination)
+        setTabs(makeTabs(for: reordered))
+
+        // Every copy of the sidebar in the tab group keeps its list until the move is done.
+        groupState.isMovingTab = true
+
+        // Take the tab out of the group and add it back beside the tab at its new position,
+        // without animating. The selected tab stays selected, but selecting a window that
+        // isn't in the group throws.
+        let target = windows[destination]
+        let selected = tabGroup.selectedWindow
+        let selectedFrame = selected?.frame
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        tabGroup.removeWindow(moving)
+        target.addTabbedWindowSafely(moving, ordered: destination < source ? .below : .above)
+        if let selected, tabGroup.windows.contains(selected) {
+            tabGroup.selectedWindow = selected
+        }
+        NSAnimationContext.endGrouping()
+
+        // Leaving and joining the group can move the window that stays on screen.
+        if let selected, let selectedFrame, selected.frame != selectedFrame {
+            selected.setFrame(selectedFrame, display: false)
+        }
+
+        DispatchQueue.main.async { [weak self, weak selected] in
+            selected?.makeKey()
+            groupState.isMovingTab = false
+
+            // Relabeling sets the key equivalents of the tabs and tells the other copies
+            // of the sidebar about the new order.
+            (self?.window?.windowController as? TerminalController)?.relabelTabs()
+            self?.refresh()
+        }
     }
 
     /// Renames a tab by editing its title in its row. The collapsed rail has no room for
@@ -450,6 +528,9 @@ final class TerminalTabSidebarGroupState {
     /// How far the list of tabs is scrolled in the copy of the sidebar on screen, or nil
     /// if it hasn't scrolled yet.
     var scrollOffset: CGFloat?
+
+    /// Whether a tab is being moved to another position by dragging its row.
+    var isMovingTab = false
 
     private static let states = NSMapTable<NSWindowTabGroup, TerminalTabSidebarGroupState>.weakToStrongObjects()
 
@@ -627,6 +708,15 @@ struct TerminalTabSidebar: View {
     static let tileSize: CGFloat = 30
     static let rowSpacing: CGFloat = 2
 
+    /// The distance from the top of one row in the list of tabs to the top of the next.
+    static let rowPitch: CGFloat = rowHeight + rowSpacing
+
+    /// The 0-based position that a row dragged `translation` points from position `from`
+    /// moves to in a list of `count` rows: that of the row nearest to where it is dropped.
+    static func reorderDestination(from: Int, translation: CGFloat, count: Int) -> Int {
+        max(0, min(from + Int((translation / rowPitch).rounded()), count - 1))
+    }
+
     /// The narrowest that resizing the sidebar can make the terminal beside it.
     static let minimumTerminalWidth: Double = 200
 
@@ -650,8 +740,35 @@ struct TerminalTabSidebar: View {
         return width + dividerWidth
     }
 
+    /// A row being dragged to another position in the list of tabs.
+    private struct ReorderDrag {
+        let id: ObjectIdentifier
+
+        /// The 0-based position of the row when the drag began.
+        let from: Int
+
+        /// How far the row has been dragged up or down.
+        var translation: CGFloat
+    }
+
+    /// The coordinate space that rows are dragged in. It is the list's, because the row
+    /// itself moves with the drag.
+    private static let listCoordinateSpace = "TerminalTabSidebarList"
+
+    /// When a drag ends, the rows go straight to their new places rather than the rows
+    /// that made room for the dragged one sliding back first.
+    private static let reorderEndTransaction: Transaction = {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        return transaction
+    }()
+
     @ObservedObject var model: TerminalTabSidebarModel
     @Binding var isCollapsed: Bool
+
+    /// The row being dragged, if any. This resets on its own if the drag is cancelled.
+    @GestureState(resetTransaction: TerminalTabSidebar.reorderEndTransaction)
+    private var reorderDrag: ReorderDrag?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -684,14 +801,26 @@ struct TerminalTabSidebar: View {
 
                 ScrollView {
                     LazyVStack(spacing: Self.rowSpacing) {
+                        let canReorder = model.canReorderTabs
                         ForEach(model.tabs) { tab in
+                            let shift = reorderShift(for: tab)
                             TerminalTabSidebarRow(
                                 model: model,
                                 tab: tab,
                                 isCompact: false,
-                                isRenaming: model.renamingTabID == tab.id)
+                                isRenaming: model.renamingTabID == tab.id
+                            )
+                            .offset(y: shift)
+                            .animation(.easeOut(duration: 0.15), value: shift)
+                            // The dragged row follows the mouse without animating.
+                            .offset(y: dragOffset(for: tab))
+                            .zIndex(reorderDrag?.id == tab.id ? 1 : 0)
+                            // Before the row's own gestures, so a drag doesn't also select
+                            // or close the tab, while a click that doesn't move still does.
+                            .highPriorityGesture(reorderGesture(for: tab), including: canReorder ? .all : .subviews)
                         }
                     }
+                    .coordinateSpace(name: Self.listCoordinateSpace)
                     .padding(.horizontal, 6)
                     .padding(.bottom, 6)
                     .background(TerminalTabSidebarScrollOffsetReader(model: model))
@@ -700,6 +829,52 @@ struct TerminalTabSidebar: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// Drags a row to another position in the list. The row moves to the position nearest
+    /// to where it is dropped, within the list.
+    private func reorderGesture(for tab: TerminalTabSidebarModel.Tab) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.listCoordinateSpace))
+            .updating($reorderDrag) { value, drag, _ in
+                if drag == nil {
+                    // Fullscreen doesn't update the view, so check again as the drag begins.
+                    guard model.canReorderTabs else { return }
+                    drag = ReorderDrag(id: tab.id, from: tab.index - 1, translation: 0)
+                }
+                drag?.translation = value.translation.height
+            }
+            .onEnded { value in
+                let source = tab.index - 1
+                let destination = Self.reorderDestination(
+                    from: source,
+                    translation: value.translation.height,
+                    count: model.tabs.count)
+                guard destination != source else { return }
+                withTransaction(Self.reorderEndTransaction) {
+                    model.move(tab, to: destination)
+                }
+            }
+    }
+
+    /// How far the row being dragged is from its place, kept within the list.
+    private func dragOffset(for tab: TerminalTabSidebarModel.Tab) -> CGFloat {
+        guard let reorderDrag, reorderDrag.id == tab.id else { return 0 }
+        let above = CGFloat(reorderDrag.from) * Self.rowPitch
+        let below = CGFloat(model.tabs.count - 1 - reorderDrag.from) * Self.rowPitch
+        return min(max(reorderDrag.translation, -above), below)
+    }
+
+    /// How far a row moves aside to make room for the row being dragged past it.
+    private func reorderShift(for tab: TerminalTabSidebarModel.Tab) -> CGFloat {
+        guard let reorderDrag, reorderDrag.id != tab.id else { return 0 }
+        let index = tab.index - 1
+        let destination = Self.reorderDestination(
+            from: reorderDrag.from,
+            translation: reorderDrag.translation,
+            count: model.tabs.count)
+        if reorderDrag.from < index && index <= destination { return -Self.rowPitch }
+        if destination <= index && index < reorderDrag.from { return Self.rowPitch }
+        return 0
     }
 
     private var collapseButton: some View {
