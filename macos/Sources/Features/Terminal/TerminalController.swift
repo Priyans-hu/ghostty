@@ -674,6 +674,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Call this last in case it uses any of the properties above.
         window.syncAppearance(surfaceConfig)
         terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: window.preferredBackgroundColor)
+
+        // The tab sidebar draws like the titlebar, which is clear with a glass background
+        // so the glass isn't tinted twice.
+        tabSidebarModel?.syncAppearance(
+            backgroundColor: surfaceConfig.backgroundBlur.isGlassStyle ? nil : window.preferredBackgroundColor,
+            titleFont: window.titlebarFont)
     }
 
     /// Adjusts the given frame for the configured window position.
@@ -1128,7 +1134,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             model.window = window
             tabSidebarModel = model
             container = TerminalViewContainer {
-                TerminalTabSidebarLayout(model: model, ghostty: ghostty) {
+                TerminalTabSidebarLayout(model: model) {
                     TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
                 }
             }

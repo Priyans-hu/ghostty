@@ -27,6 +27,13 @@ final class TerminalTabSidebarModel: ObservableObject {
 
     @Published private(set) var tabs: [Tab] = []
 
+    /// The color behind the sidebar, which is the one the window's titlebar uses. Nil draws
+    /// nothing, so a glass window background shows through.
+    @Published private(set) var backgroundColor: NSColor?
+
+    /// The font of the window's title, or nil for the system font.
+    @Published private(set) var titleFont: NSFont?
+
     /// The window this sidebar is shown in.
     weak var window: NSWindow? {
         didSet {
@@ -172,6 +179,17 @@ final class TerminalTabSidebarModel: ObservableObject {
         tabs = newTabs
     }
 
+    /// Matches the sidebar to its window's titlebar. Only changed values are published.
+    func syncAppearance(backgroundColor: NSColor?, titleFont: NSFont?) {
+        if self.backgroundColor != backgroundColor {
+            self.backgroundColor = backgroundColor
+        }
+
+        if self.titleFont != titleFont {
+            self.titleFont = titleFont
+        }
+    }
+
     func newTab() {
         (window?.windowController as? TerminalController)?.newTab(nil)
     }
@@ -294,7 +312,6 @@ final class TerminalTabSidebarModel: ObservableObject {
 /// Places the vertical tab sidebar beside a terminal window's content.
 struct TerminalTabSidebarLayout<Content: View>: View {
     @ObservedObject var model: TerminalTabSidebarModel
-    @ObservedObject var ghostty: Ghostty.App
     let content: Content
 
     @AppStorage(TerminalTabSidebar.collapsedKey, store: .ghostty) private var isCollapsed = false
@@ -303,18 +320,18 @@ struct TerminalTabSidebarLayout<Content: View>: View {
     /// The sidebar width when the current resize drag began.
     @State private var widthAtDragStart: Double?
 
-    init(model: TerminalTabSidebarModel, ghostty: Ghostty.App, @ViewBuilder content: () -> Content) {
+    init(model: TerminalTabSidebarModel, @ViewBuilder content: () -> Content) {
         self.model = model
-        self.ghostty = ghostty
         self.content = content()
     }
 
     var body: some View {
         HStack(spacing: 0) {
+            // The window's appearance already follows its background, so the sidebar's
+            // light or dark content matches the titlebar without setting a color scheme.
             TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
                 .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
-                .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
-                .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
+                .background(Color(nsColor: model.backgroundColor ?? .clear))
 
             divider
 
@@ -549,7 +566,7 @@ private extension View {
 /// One tab in the sidebar: a pill-shaped row when the sidebar is expanded, or a round
 /// tile showing its key equivalent in the collapsed rail. The selected tab is drawn on glass like a native tab.
 private struct TerminalTabSidebarRow: View {
-    let model: TerminalTabSidebarModel
+    @ObservedObject var model: TerminalTabSidebarModel
     let tab: TerminalTabSidebarModel.Tab
     let isCompact: Bool
 
@@ -557,7 +574,8 @@ private struct TerminalTabSidebarRow: View {
 
     var body: some View {
         content
-            .font(.system(size: 13))
+            // Like the titlebar, titles use `window-title-font-family` when it is set.
+            .font(model.titleFont.map { Font($0) } ?? .system(size: 13))
             .foregroundStyle(Color.primary.opacity(tab.isSelected ? 1 : 0.75))
             .background(Capsule().fill(hoverFill))
             .terminalTabSidebarGlass(
@@ -568,7 +586,7 @@ private struct TerminalTabSidebarRow: View {
             .contentShape(Capsule())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
-            .help(isCompact ? tab.title : "")
+            .help(tab.title)
             .overlay(TerminalTabSidebarMenuArea { model.contextMenu(for: tab) })
             .accessibilityElement(children: .combine)
             .accessibilityLabel(tab.title)
