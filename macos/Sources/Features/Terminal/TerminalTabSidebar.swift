@@ -37,6 +37,10 @@ final class TerminalTabSidebarModel: ObservableObject {
     /// The tab whose title is being edited in its row, if any.
     @Published private(set) var renamingTabID: ObjectIdentifier?
 
+    /// Incremented when the list of tabs should scroll the selected tab into view: when
+    /// the window becomes key, and when tabs are added while it is on screen.
+    @Published private(set) var revealCount = 0
+
     /// The title that the edit in progress started from.
     private(set) var renameSeed = ""
 
@@ -87,7 +91,8 @@ final class TerminalTabSidebarModel: ObservableObject {
     ///
     /// A hidden copy of the sidebar skips refreshes, so it also refreshes when its window
     /// becomes key, which happens before the window is drawn, and when its window comes
-    /// back on screen without becoming key, such as when the app is unhidden.
+    /// back on screen without becoming key, such as when the app is unhidden. Becoming
+    /// key also scrolls the selected tab into view.
     ///
     /// Like the native tab bar's editor, a title edit in progress commits when the window
     /// stops being key, such as when another tab is selected, and when it closes.
@@ -128,7 +133,9 @@ final class TerminalTabSidebarModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refresh()
+                guard let self else { return }
+                self.refresh()
+                self.revealCount += 1
             }
         })
 
@@ -186,6 +193,19 @@ final class TerminalTabSidebarModel: ObservableObject {
         return window.tabGroup?.windows ?? [window]
     }
 
+    /// The state shared with the other copies of the sidebar in our tab group. It is
+    /// looked up each time because the window can move to another tab group.
+    var groupState: TerminalTabSidebarGroupState? {
+        window?.tabGroup.map(TerminalTabSidebarGroupState.shared(for:))
+    }
+
+    /// Whether this is the selected tab's copy of the sidebar, which is the one on screen.
+    /// It already is when its window becomes key, before the window is drawn.
+    private var isSelectedTab: Bool {
+        guard let window else { return false }
+        return (window.tabGroup?.selectedWindow ?? window) === window
+    }
+
     func refresh() {
         // The window only carries a key equivalent label while it is in a tab group, so a
         // lone tab would have none. Look the shortcuts up from the keybinds instead.
@@ -210,7 +230,23 @@ final class TerminalTabSidebarModel: ObservableObject {
         }
 
         guard newTabs != tabs else { return }
+
+        // Keep the selected tab in view when tabs are added on screen, such as a new tab
+        // that the tab group only lists once it settles. Closing other tabs doesn't scroll
+        // the list back to the selected tab, which would be in the way of closing more.
+        let isTabAdded = newTabs.count > tabs.count
         tabs = newTabs
+        if isTabAdded && isSelectedTab {
+            revealCount += 1
+        }
+    }
+
+    /// Remembers how far the list of tabs is scrolled, so the copy of the sidebar shown
+    /// when another tab is selected scrolls the same. Only the copy on screen counts. The
+    /// others can lay out again while hidden, such as when the sidebar is resized.
+    func scrollOffsetDidChange(_ offset: CGFloat) {
+        guard isSelectedTab else { return }
+        groupState?.scrollOffset = offset
     }
 
     /// Matches the sidebar to its window's titlebar. Only changed values are published.
@@ -408,6 +444,26 @@ final class TerminalTabSidebarModel: ObservableObject {
     }
 }
 
+/// The state shared by the copies of the vertical tab sidebar in one tab group.
+@MainActor
+final class TerminalTabSidebarGroupState {
+    /// How far the list of tabs is scrolled in the copy of the sidebar on screen, or nil
+    /// if it hasn't scrolled yet.
+    var scrollOffset: CGFloat?
+
+    private static let states = NSMapTable<NSWindowTabGroup, TerminalTabSidebarGroupState>.weakToStrongObjects()
+
+    static func shared(for tabGroup: NSWindowTabGroup) -> TerminalTabSidebarGroupState {
+        if let state = states.object(forKey: tabGroup) {
+            return state
+        }
+
+        let state = TerminalTabSidebarGroupState()
+        states.setObject(state, forKey: tabGroup)
+        return state
+    }
+}
+
 /// Places the vertical tab sidebar beside a terminal window's content.
 struct TerminalTabSidebarLayout<Content: View>: View {
     @ObservedObject var model: TerminalTabSidebarModel
@@ -565,6 +621,12 @@ struct TerminalTabSidebar: View {
     static let collapsedWidth: Double = 40
     static let dividerWidth: Double = 1
 
+    /// The height of a row in the list of tabs, the size of a tile in the collapsed rail,
+    /// and the space between them.
+    static let rowHeight: CGFloat = 28
+    static let tileSize: CGFloat = 30
+    static let rowSpacing: CGFloat = 2
+
     /// The narrowest that resizing the sidebar can make the terminal beside it.
     static let minimumTerminalWidth: Double = 200
 
@@ -602,13 +664,15 @@ struct TerminalTabSidebar: View {
                 .padding(.bottom, 6)
 
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 2) {
+                    LazyVStack(spacing: Self.rowSpacing) {
                         ForEach(model.tabs) { tab in
                             TerminalTabSidebarRow(model: model, tab: tab, isCompact: true)
                         }
                     }
                     .padding(.bottom, 6)
+                    .background(TerminalTabSidebarScrollOffsetReader(model: model))
                 }
+                .modifier(TerminalTabSidebarScrollKeeper(model: model, rowHeight: Self.tileSize))
             } else {
                 HStack {
                     collapseButton
@@ -618,25 +682,21 @@ struct TerminalTabSidebar: View {
                 .padding(.horizontal, 6)
                 .frame(height: 40)
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 2) {
-                            ForEach(model.tabs) { tab in
-                                TerminalTabSidebarRow(
-                                    model: model,
-                                    tab: tab,
-                                    isCompact: false,
-                                    isRenaming: model.renamingTabID == tab.id)
-                            }
+                ScrollView {
+                    LazyVStack(spacing: Self.rowSpacing) {
+                        ForEach(model.tabs) { tab in
+                            TerminalTabSidebarRow(
+                                model: model,
+                                tab: tab,
+                                isCompact: false,
+                                isRenaming: model.renamingTabID == tab.id)
                         }
-                        .padding(.horizontal, 6)
-                        .padding(.bottom, 6)
                     }
-                    // Keep the row whose title is being edited in view.
-                    .onChange(of: model.renamingTabID) { id in
-                        if let id { proxy.scrollTo(id) }
-                    }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
+                    .background(TerminalTabSidebarScrollOffsetReader(model: model))
                 }
+                .modifier(TerminalTabSidebarScrollKeeper(model: model, rowHeight: Self.rowHeight))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -656,6 +716,86 @@ struct TerminalTabSidebar: View {
     private var newTabButton: some View {
         TerminalTabSidebarButton(systemName: "plus", label: "New Tab") {
             model.newTab()
+        }
+    }
+}
+
+/// Scrolls a list of tabs in the sidebar the same as the copy of the sidebar that was on
+/// screen before, and only as much more as it takes to show all of the selected tab's
+/// row. Every tab's window has its own copy, so the list would otherwise jump whenever
+/// another tab is selected.
+private struct TerminalTabSidebarScrollKeeper: ViewModifier {
+    static let coordinateSpace = "TerminalTabSidebarScrollView"
+
+    @ObservedObject var model: TerminalTabSidebarModel
+
+    /// The height of every row in the list.
+    let rowHeight: CGFloat
+
+    func body(content: Content) -> some View {
+        ScrollViewReader { proxy in
+            GeometryReader { geometry in
+                let listHeight = geometry.size.height
+                content
+                    .coordinateSpace(name: Self.coordinateSpace)
+                    .onAppear {
+                        // The list hasn't laid out its rows yet.
+                        DispatchQueue.main.async {
+                            reveal(proxy, listHeight: listHeight)
+                        }
+                    }
+                    .onChange(of: model.revealCount) { _ in
+                        reveal(proxy, listHeight: listHeight)
+                    }
+                    // Keep the row whose title is being edited in view.
+                    .onChange(of: model.renamingTabID) { id in
+                        if let id { proxy.scrollTo(id) }
+                    }
+            }
+        }
+    }
+
+    private func reveal(_ proxy: ScrollViewProxy, listHeight: CGFloat) {
+        guard let index = model.tabs.firstIndex(where: \.isSelected) else { return }
+        let id = model.tabs[index].id
+        let anchor = revealAnchor(forRowAt: index, listHeight: listHeight)
+
+        // Scrolling right away keeps the window from being drawn at the old offset first.
+        // Rows that changed along with this may not be laid out until this turn of the main
+        // queue is over, so scroll to the same place once more then.
+        proxy.scrollTo(id, anchor: anchor)
+        DispatchQueue.main.async {
+            proxy.scrollTo(id, anchor: anchor)
+        }
+    }
+
+    /// The anchor for scrolling to the selected row, which is at `index`, that leaves the
+    /// list where the copy of the sidebar on screen before had it, if all of the row is in
+    /// view there. Otherwise the row is aligned at its nearer edge. Nil scrolls as little
+    /// as it takes to show the row from wherever this copy of the list is.
+    private func revealAnchor(forRowAt index: Int, listHeight: CGFloat) -> UnitPoint? {
+        guard let offset = model.groupState?.scrollOffset, listHeight > rowHeight else { return nil }
+
+        // Every row has the same height, so this is where the top of the row would be
+        // with the list at that offset. Aligning the same fraction of the row and of the
+        // list puts the row exactly there.
+        let top = CGFloat(index) * (rowHeight + TerminalTabSidebar.rowSpacing) - offset
+        if top < 0 { return .top }
+        if top > listHeight - rowHeight { return .bottom }
+        return UnitPoint(x: 0.5, y: top / (listHeight - rowHeight))
+    }
+}
+
+/// Tells the model how far the list of tabs it is behind is scrolled.
+private struct TerminalTabSidebarScrollOffsetReader: View {
+    let model: TerminalTabSidebarModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            let top = geometry.frame(in: .named(TerminalTabSidebarScrollKeeper.coordinateSpace)).minY
+            Color.clear.onChange(of: top) { top in
+                model.scrollOffsetDidChange(-top)
+            }
         }
     }
 }
@@ -798,6 +938,14 @@ private struct TerminalTabSidebarRow: View {
                 model.select(tab)
             }
             .onHover { isHovering = $0 }
+            // Selecting another tab hides this window with the mouse still on the row, so
+            // the row would look hovered when its window is shown again.
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSWindow.didResignKeyNotification,
+                object: model.window
+            )) { _ in
+                isHovering = false
+            }
             .help(tab.title)
             .overlay(TerminalTabSidebarClickArea(
                 tabID: tab.id,
@@ -830,7 +978,7 @@ private struct TerminalTabSidebarRow: View {
         // The key equivalent that selects the tab (e.g. ⌘1), or its position when it has none.
         Text(tab.keyEquivalent ?? "\(tab.index)")
             .font(.system(size: 11))
-            .frame(width: 30, height: 30)
+            .frame(width: TerminalTabSidebar.tileSize, height: TerminalTabSidebar.tileSize)
             .overlay(alignment: .topTrailing) {
                 if let color = tab.color.displayColor {
                     Circle()
@@ -877,7 +1025,7 @@ private struct TerminalTabSidebarRow: View {
         }
         .padding(.leading, 4)
         .padding(.trailing, 10)
-        .frame(height: 28)
+        .frame(height: TerminalTabSidebar.rowHeight)
     }
 }
 
