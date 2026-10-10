@@ -99,6 +99,7 @@ struct ConfigTests {
         ("native", Ghostty.Config.MacOSTitlebarStyle.native),
         ("transparent", Ghostty.Config.MacOSTitlebarStyle.transparent),
         ("tabs", Ghostty.Config.MacOSTitlebarStyle.tabs),
+        ("vertical-tabs", Ghostty.Config.MacOSTitlebarStyle.verticalTabs),
         ("hidden", Ghostty.Config.MacOSTitlebarStyle.hidden),
     ])
     func macosTitlebarStyleValues(raw: String, expected: Ghostty.Config.MacOSTitlebarStyle) throws {
