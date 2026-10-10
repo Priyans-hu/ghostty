@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 final class GhosttyVerticalTabsUITests: GhosttyCustomConfigCase {
@@ -129,6 +130,132 @@ final class GhosttyVerticalTabsUITests: GhosttyCustomConfigCase {
         XCTAssertEqual(tabRows(in: app).element(boundBy: 0).label, "Prompted", "The tab should have the new title")
     }
 
+    // MARK: - Tabs
+
+    @MainActor
+    func testNewTabButtonAddsSelectedRow() throws {
+        let app = try launchGhostty()
+
+        app.windows.firstMatch.buttons["New Tab"].firstMatch.click()
+
+        let rows = tabRows(in: app)
+        XCTAssertTrue(rows.element(boundBy: 1).waitForExistence(timeout: 5), "The new tab should have a row")
+        XCTAssertEqual(rows.count, 2, "There should be 2 tabs")
+        assertSelectedRow(1, in: app, "The new tab should be selected")
+    }
+
+    @MainActor
+    func testCloseButtonRemovesRow() throws {
+        // Close the tab without asking, even if its shell hasn't reached a prompt yet.
+        try updateConfig(
+            """
+            \(Self.config)
+            confirm-close-surface = false
+            """
+        )
+        let app = try launchGhostty()
+        newTab(in: app)
+
+        // The close button only shows while the row is hovered. It is at the leading end
+        // of the row, in place of the tab's color.
+        let closeButton = tabRows(in: app).element(boundBy: 1)
+            .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+            .withOffset(CGVector(dx: 15, dy: 0))
+        closeButton.hover()
+        closeButton.click()
+
+        XCTAssertTrue(tabRows(in: app).element(boundBy: 1).waitForNonExistence(timeout: 5), "Closing the tab should remove its row")
+        XCTAssertEqual(tabRows(in: app).count, 1, "There should be 1 tab")
+    }
+
+    @MainActor
+    func testSelectedRowFollowsTabSelection() throws {
+        let app = try launchGhostty()
+        newTab(in: app)
+        newTab(in: app)
+
+        app.typeKey("1", modifierFlags: .command)
+        assertSelectedRow(0, in: app, "Cmd+1 should select the first tab")
+
+        tabRows(in: app).element(boundBy: 2).click()
+        assertSelectedRow(2, in: app, "Clicking the third row should select its tab")
+
+        app.typeKey("[", modifierFlags: [.command, .shift])
+        assertSelectedRow(1, in: app, "Cmd+Shift+[ should select the previous tab")
+    }
+
+    // MARK: - Window
+
+    @MainActor
+    func testZoomIndicatorWithTabs() throws {
+        let app = try launchGhostty()
+        newTab(in: app)
+
+        // Split, then zoom the new split.
+        app.windows.firstMatch.groups["Terminal pane"].firstMatch.typeKey("d", modifierFlags: .command)
+        app.typeKey("\n", modifierFlags: [.command, .shift])
+
+        // Each native tab has a reset zoom button, but the native tab bar is hidden, so the
+        // titlebar keeps its own.
+        let resetZoomButton = app.windows.firstMatch.buttons["ResetZoom"].firstMatch
+        XCTAssertTrue(resetZoomButton.waitForExistence(timeout: 5), "The titlebar should show the reset zoom button")
+        XCTAssertTrue(resetZoomButton.isHittable, "The reset zoom button should be visible")
+    }
+
+    @MainActor
+    func testShowTabBarMenuIsDisabled() throws {
+        let app = try launchGhostty()
+
+        // AppKit adds this item to the View menu. Its title says Show or Hide Tab Bar.
+        app.menuBarItems["View"].firstMatch.click()
+        let item = app.menuItems.matching(NSPredicate(
+            format: "identifier == %@ OR title IN %@",
+            "toggleTabBar:",
+            ["Show Tab Bar", "Hide Tab Bar"]
+        )).firstMatch
+        guard item.waitForExistence(timeout: 2) else {
+            app.typeKey(.escape, modifierFlags: [])
+            throw XCTSkip("AppKit didn't add Show Tab Bar to the View menu")
+        }
+
+        XCTAssertFalse(item.isEnabled, "The tab sidebar replaces the tab bar, so it can't be shown")
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
+    @MainActor
+    func testSidebarMatchesTitlebarBackground() async throws {
+        try updateConfig(
+            """
+            \(Self.config)
+            background = 336699
+            """
+        )
+        let app = try launchGhostty()
+        let window = app.windows.firstMatch
+
+        // Let the window finish appearing and the shell start.
+        try await Task.sleep(for: .seconds(1))
+
+        let before = try sidebarAndTitlebarColors(in: window)
+        XCTAssertTrue(before.sidebar.isClose(to: before.titlebar), "The tab sidebar should match the titlebar: \(before.sidebar) != \(before.titlebar)")
+
+        // The titlebar follows a background color set by the terminal, and so should the
+        // sidebar. Wait for the shell to run printf and the titlebar to change.
+        app.typeText("printf '\\e]11;#993366\\a'\n")
+        let deadline = Date().addingTimeInterval(10)
+        var after = before
+        while after.titlebar.isClose(to: before.titlebar), Date() < deadline {
+            try await Task.sleep(for: .seconds(0.5))
+            after = try sidebarAndTitlebarColors(in: window)
+        }
+        XCTAssertFalse(after.titlebar.isClose(to: before.titlebar), "OSC 11 should change the titlebar")
+
+        // Give the sidebar a moment to draw too.
+        try await Task.sleep(for: .seconds(0.5))
+        after = try sidebarAndTitlebarColors(in: window)
+        XCTAssertTrue(after.sidebar.isClose(to: after.titlebar), "The tab sidebar should match the titlebar: \(after.sidebar) != \(after.titlebar)")
+    }
+
     // MARK: - Helpers
 
     /// Launches Ghostty with the tab sidebar's width and collapsed state reset, since they
@@ -185,5 +312,55 @@ final class GhosttyVerticalTabsUITests: GhosttyCustomConfigCase {
         editor.typeKey("a", modifierFlags: .command)
         editor.typeKey(.delete, modifierFlags: [])
         editor.typeText("\(title)\n")
+    }
+
+    /// Waits for the sidebar on screen to show the tab at `index` as its only selected tab.
+    @MainActor
+    private func assertSelectedRow(
+        _ index: Int,
+        in app: XCUIApplication,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let rows = tabRows(in: app)
+        XCTAssertTrue(rows.element(boundBy: index).wait(for: \.isSelected, toEqual: true, timeout: 5), message, file: file, line: line)
+
+        let selected = rows.allElementsBoundByIndex.indices.filter { rows.element(boundBy: $0).isSelected }
+        XCTAssertEqual(selected, [index], message, file: file, line: line)
+    }
+
+    /// The colors in a screenshot of the window behind the tab sidebar, below its tabs, and
+    /// in the titlebar, between the window buttons and the title.
+    @MainActor
+    private func sidebarAndTitlebarColors(in window: XCUIElement) throws -> (sidebar: NSColor, titlebar: NSColor) {
+        let frame = window.frame
+        let image = window.screenshot().image
+        guard let pixelWidth = image.cgImage(forProposedRect: nil, context: nil, hints: nil)?.width else {
+            throw XCTSkip("failed to get the window's pixels")
+        }
+
+        // The screenshot has the screen's scale. Pixels are counted from the top left.
+        let scale = CGFloat(pixelWidth) / frame.width
+        func color(x: CGFloat, y: CGFloat) throws -> NSColor {
+            guard let color = image.colorAt(x: Int(x * scale), y: Int(y * scale)) else {
+                throw XCTSkip("failed to get pixel color")
+            }
+            return color
+        }
+
+        let sidebar = try color(x: 100, y: frame.height - 40)
+        let titlebar = try color(x: 120, y: 10)
+        return (sidebar, titlebar)
+    }
+}
+
+private extension NSColor {
+    /// Whether this color looks the same as `other`, within `tolerance` in each sRGB component.
+    func isClose(to other: NSColor, tolerance: CGFloat = 0.03) -> Bool {
+        guard let color = usingColorSpace(.sRGB), let other = other.usingColorSpace(.sRGB) else { return false }
+        return abs(color.redComponent - other.redComponent) <= tolerance
+            && abs(color.greenComponent - other.greenComponent) <= tolerance
+            && abs(color.blueComponent - other.blueComponent) <= tolerance
     }
 }
