@@ -194,6 +194,14 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
             // unconditionally.
 
             guard let self else { return }
+
+            // The tab sidebar lists the windows of the tab group. Some changes,
+            // such as moving the selected tab to a new window, post nothing else,
+            // and a closing tab can leave the group after its window posted.
+            if self.showsTabSidebar {
+                NotificationCenter.default.post(name: .terminalTabsDidChange, object: self)
+            }
+
             guard let lastSurfaceConfig else { return }
             self.syncAppearance(lastSurfaceConfig)
         }

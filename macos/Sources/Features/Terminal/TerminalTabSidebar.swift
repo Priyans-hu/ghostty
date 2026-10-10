@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 extension Notification.Name {
-    /// Posted when the tabs of any terminal window may have changed: their order, titles,
-    /// colors, key equivalents, or which one is selected.
+    /// Posted when the tabs of a window with the vertical tab sidebar may have changed: their
+    /// order, titles, colors, key equivalents, or which one is selected. The object is the
+    /// window whose tab changed.
     static let terminalTabsDidChange = Notification.Name("com.mitchellh.ghostty.terminalTabsDidChange")
 }
 
@@ -29,26 +30,26 @@ final class TerminalTabSidebarModel: ObservableObject {
     /// The window this sidebar is shown in.
     weak var window: NSWindow? {
         didSet {
-            observeWindowClose()
+            observeWindow()
             refresh()
         }
     }
 
     private var observer: NSObjectProtocol?
-    private var closeObserver: NSObjectProtocol?
+    private var windowObservers: [NSObjectProtocol] = []
+
+    /// Whether a refresh is already waiting to run on the main queue.
+    private var isRefreshScheduled = false
 
     init() {
         observer = NotificationCenter.default.addObserver(
             forName: .terminalTabsDidChange,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             // The observer is delivered on the main queue.
             MainActor.assumeIsolated {
-                self?.refresh()
-
-                // The tab group takes an event loop cycle to settle after a tab is added or closed.
-                DispatchQueue.main.async { self?.refresh() }
+                self?.tabsDidChange(notification.object as? NSWindow)
             }
         }
     }
@@ -57,21 +58,26 @@ final class TerminalTabSidebarModel: ObservableObject {
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
-        if let closeObserver {
-            NotificationCenter.default.removeObserver(closeObserver)
+        for windowObserver in windowObservers {
+            NotificationCenter.default.removeObserver(windowObserver)
         }
     }
 
     /// Forgets the window once it closes. Asking AppKit for a closed window's tabs (as a
     /// late refresh would) registers it with a tab group again, which keeps it alive.
-    private func observeWindowClose() {
-        if let closeObserver {
-            NotificationCenter.default.removeObserver(closeObserver)
-            self.closeObserver = nil
+    ///
+    /// A hidden copy of the sidebar skips refreshes, so it also refreshes when its window
+    /// becomes key, which happens before the window is drawn, and when its window comes
+    /// back on screen without becoming key, such as when the app is unhidden.
+    private func observeWindow() {
+        let center = NotificationCenter.default
+        for windowObserver in windowObservers {
+            center.removeObserver(windowObserver)
         }
+        windowObservers = []
         guard let window else { return }
 
-        closeObserver = NotificationCenter.default.addObserver(
+        windowObservers.append(center.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
@@ -79,6 +85,58 @@ final class TerminalTabSidebarModel: ObservableObject {
             MainActor.assumeIsolated {
                 self?.window = nil
             }
+        })
+
+        windowObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refresh()
+            }
+        })
+
+        windowObservers.append(center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.window?.occlusionState.contains(.visible) == true else { return }
+                self.refresh()
+            }
+        })
+    }
+
+    /// Refreshes once the tab group settles if the window whose tab changed is ours or one
+    /// of our tabs. Only identities are compared, because asking a closing window for its
+    /// tab group would register it with one again.
+    private func tabsDidChange(_ changed: NSWindow?) {
+        if let changed,
+           changed !== window,
+           !tabs.contains(where: { $0.id == ObjectIdentifier(changed) }) {
+            return
+        }
+
+        scheduleRefresh()
+    }
+
+    /// Refreshes on the next turn of the main queue, once for however many changes arrive
+    /// before then. The tab group takes that long to settle after a tab is added, closed,
+    /// or moved.
+    private func scheduleRefresh() {
+        guard !isRefreshScheduled else { return }
+        isRefreshScheduled = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isRefreshScheduled = false
+
+            // Only the selected tab's copy of the sidebar is on screen. The others catch
+            // up when their window is shown.
+            guard self.window?.isVisible == true else { return }
+            self.refresh()
         }
     }
 

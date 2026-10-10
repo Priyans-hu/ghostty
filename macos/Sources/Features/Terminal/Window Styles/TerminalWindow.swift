@@ -73,7 +73,9 @@ class TerminalWindow: NSWindow {
             guard tabColor != oldValue else { return }
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
             invalidateRestorableState()
-            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+            if showsTabSidebar {
+                NotificationCenter.default.post(name: .terminalTabsDidChange, object: self)
+            }
         }
     }
 
@@ -411,7 +413,9 @@ class TerminalWindow: NSWindow {
             guard title != oldValue else { return }
 
             syncWindowTitleAppearance()
-            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+            if showsTabSidebar {
+                NotificationCenter.default.post(name: .terminalTabsDidChange, object: self)
+            }
         }
     }
 

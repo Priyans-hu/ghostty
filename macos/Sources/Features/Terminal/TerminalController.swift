@@ -618,7 +618,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
-        NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+        if (window as? TerminalWindow)?.showsTabSidebar == true {
+            NotificationCenter.default.post(name: .terminalTabsDidChange, object: window)
+        }
     }
 
     private func fixTabBar() {
