@@ -240,9 +240,14 @@ class TerminalWindow: NSWindow {
 
     @discardableResult
     func beginInlineTabTitleEdit(for targetWindow: NSWindow) -> Bool {
-        // The tab sidebar hides the native tab bar, so an inline edit there would be
-        // invisible. Returning false makes callers prompt for the title instead.
-        guard !showsTabSidebar else { return false }
+        // The tab sidebar hides the native tab bar, so the title is edited in the sidebar
+        // instead, in the selected tab's copy since that is the one on screen. The sidebar
+        // can't edit it when collapsed, and returning false makes callers prompt for it.
+        if showsTabSidebar {
+            let selectedWindow = (tabGroup?.selectedWindow ?? self) as? TerminalWindow
+            return selectedWindow?.terminalController?.beginTabSidebarRename(for: targetWindow) ?? false
+        }
+
         return tabTitleEditor.beginEditing(for: targetWindow)
     }
 
@@ -899,7 +904,10 @@ extension TerminalWindow: TabTitleEditorDelegate {
         _ editor: TabTitleEditor,
         canRenameTabFor targetWindow: NSWindow
     ) -> Bool {
-        targetWindow.windowController is BaseTerminalController
+        // The tab sidebar hides the native tab bar, so double-clicks where it would be
+        // mustn't start an edit that can't be seen. The sidebar edits titles instead.
+        guard !showsTabSidebar else { return false }
+        return targetWindow.windowController is BaseTerminalController
     }
 
     func tabTitleEditor(
