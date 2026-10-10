@@ -709,7 +709,8 @@ private struct TerminalTabSidebarRow: View {
                 tabID: tab.id,
                 isRenaming: isRenaming,
                 menu: { model.contextMenu(for: tab) },
-                onDoubleClick: { model.rename(tab) }))
+                onDoubleClick: { model.rename(tab) },
+                onMiddleClick: { model.close(tab) }))
             // The editor has to stay reachable while the title is being edited.
             .accessibilityElement(children: isRenaming ? .contain : .combine)
             .accessibilityIdentifier("TerminalTabSidebarRow")
@@ -891,13 +892,14 @@ private struct TerminalTabSidebarTitleEditor: NSViewRepresentable {
 }
 
 /// Handles the clicks on a tab in the sidebar that SwiftUI can't: a right-click or
-/// control-click shows an AppKit menu, and a double-click renames the tab. Every other
-/// mouse event goes through to the SwiftUI views beneath it.
+/// control-click shows an AppKit menu, a double-click renames the tab, and a middle click
+/// closes it. Every other mouse event goes through to the SwiftUI views beneath it.
 private struct TerminalTabSidebarClickArea: NSViewRepresentable {
     let tabID: ObjectIdentifier
     let isRenaming: Bool
     let menu: () -> NSMenu
     let onDoubleClick: () -> Void
+    let onMiddleClick: () -> Void
 
     func makeNSView(context: Context) -> ClickAreaView {
         let view = ClickAreaView()
@@ -910,6 +912,7 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
         nsView.isRenaming = isRenaming
         nsView.menuProvider = menu
         nsView.onDoubleClick = onDoubleClick
+        nsView.onMiddleClick = onMiddleClick
     }
 
     final class ClickAreaView: NSView {
@@ -922,10 +925,14 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
         var isRenaming = false
         var menuProvider: (() -> NSMenu)?
         var onDoubleClick: (() -> Void)?
+        var onMiddleClick: (() -> Void)?
 
         /// Whether this view kept the last mouse down from the row beneath, so it keeps the
         /// mouse up too.
         private var keptMouseDown = false
+
+        /// Whether a middle click started on this tab.
+        private var middleClickStarted = false
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             // While the title is being edited, every click belongs to the editor. Otherwise
@@ -947,6 +954,9 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
                     Self.lastClickedTabID = tabID
                 }
                 return nil
+            case .otherMouseDown where event.buttonNumber == 2,
+                 .otherMouseUp where event.buttonNumber == 2:
+                return super.hitTest(point)
             default:
                 return nil
             }
@@ -973,6 +983,32 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
                 return
             }
             keptMouseDown = false
+        }
+
+        override func otherMouseDown(with event: NSEvent) {
+            guard event.buttonNumber == 2 else {
+                super.otherMouseDown(with: event)
+                return
+            }
+            middleClickStarted = true
+        }
+
+        override func otherMouseUp(with event: NSEvent) {
+            guard event.buttonNumber == 2 else {
+                super.otherMouseUp(with: event)
+                return
+            }
+
+            // The tab only closes if the middle click is released on the tab it started on.
+            let isClick = middleClickStarted && bounds.contains(convert(event.locationInWindow, from: nil))
+            middleClickStarted = false
+            guard isClick else { return }
+
+            // Closing the tab can close this window or ask for confirmation, so it waits
+            // until this event is done.
+            DispatchQueue.main.async { [onMiddleClick] in
+                onMiddleClick?()
+            }
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {
