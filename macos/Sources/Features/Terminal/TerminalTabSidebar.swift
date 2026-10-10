@@ -34,6 +34,18 @@ final class TerminalTabSidebarModel: ObservableObject {
     /// The font of the window's title, or nil for the system font.
     @Published private(set) var titleFont: NSFont?
 
+    /// The tab whose title is being edited in its row, if any.
+    @Published private(set) var renamingTabID: ObjectIdentifier?
+
+    /// The title that the edit in progress started from.
+    private(set) var renameSeed = ""
+
+    /// The title typed so far in the edit in progress.
+    var renameText = ""
+
+    /// The controller of the tab whose title is being edited.
+    private weak var renamingController: BaseTerminalController?
+
     /// The window this sidebar is shown in.
     weak var window: NSWindow? {
         didSet {
@@ -76,6 +88,9 @@ final class TerminalTabSidebarModel: ObservableObject {
     /// A hidden copy of the sidebar skips refreshes, so it also refreshes when its window
     /// becomes key, which happens before the window is drawn, and when its window comes
     /// back on screen without becoming key, such as when the app is unhidden.
+    ///
+    /// Like the native tab bar's editor, a title edit in progress commits when the window
+    /// stops being key, such as when another tab is selected, and when it closes.
     private func observeWindow() {
         let center = NotificationCenter.default
         for windowObserver in windowObservers {
@@ -90,7 +105,20 @@ final class TerminalTabSidebarModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                // Forgetting the window empties the list of tabs, which would cancel
+                // the edit, so commit it first.
+                self?.finishRename(commit: true)
                 self?.window = nil
+            }
+        })
+
+        windowObservers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.finishRename(commit: true)
             }
         })
 
@@ -175,6 +203,12 @@ final class TerminalTabSidebarModel: ObservableObject {
             )
         }
 
+        // The tab whose title is being edited is gone, such as when it was closed or
+        // moved to another window, so there is nothing to commit the edit to.
+        if let renamingTabID, !newTabs.contains(where: { $0.id == renamingTabID }) {
+            finishRename(commit: false)
+        }
+
         guard newTabs != tabs else { return }
         tabs = newTabs
     }
@@ -195,6 +229,8 @@ final class TerminalTabSidebarModel: ObservableObject {
     }
 
     func select(_ tab: Tab) {
+        // Like clicking anywhere else, selecting a tab commits a title edit in progress.
+        finishRename(commit: true)
         tabWindow(for: tab)?.makeKeyAndOrderFront(nil)
     }
 
@@ -220,9 +256,72 @@ final class TerminalTabSidebarModel: ObservableObject {
         window?.toggleTabOverview(nil)
     }
 
-    func promptTitle(_ tab: Tab) {
+    /// Renames a tab by editing its title in its row. The collapsed rail has no room for
+    /// an editor, so it prompts for the title instead.
+    func rename(_ tab: Tab) {
+        guard let tabWindow = tabWindow(for: tab) else { return }
+        if beginRename(for: tabWindow) { return }
+
+        // This runs from menus and mouse events, so the prompt's sheet is shown once
+        // they are done.
         select(tab)
-        controller(for: tab)?.promptTabTitle()
+        let tabController = controller(for: tab)
+        DispatchQueue.main.async { [weak tabController] in
+            tabController?.promptTabTitle()
+        }
+    }
+
+    /// Starts editing a tab's title in its row. Returns false if the sidebar can't, such as
+    /// when it is collapsed to the rail, which has no room for an editor.
+    @discardableResult
+    func beginRename(for tabWindow: NSWindow) -> Bool {
+        guard !UserDefaults.ghostty.bool(forKey: TerminalTabSidebar.collapsedKey),
+              tabWindows.contains(where: { $0 === tabWindow }),
+              let controller = tabWindow.windowController as? BaseTerminalController
+        else { return false }
+
+        // Starting over would throw away what has been typed.
+        let id = ObjectIdentifier(tabWindow)
+        guard renamingTabID != id else { return true }
+        finishRename(commit: true)
+
+        // Like the title prompt, start from the title the user set, if any.
+        renameSeed = controller.titleOverride ?? tabWindow.title
+        renameText = renameSeed
+        renamingController = controller
+        renamingTabID = id
+        return true
+    }
+
+    /// Ends the title edit in progress, if any, and gives the terminal its focus back.
+    func finishRename(commit: Bool) {
+        // Cleared first so the editor ending its own editing can't finish the edit again.
+        guard renamingTabID != nil else { return }
+        renamingTabID = nil
+
+        if commit, let renamingController {
+            renamingController.titleOverride = Self.titleOverride(
+                committing: renameText,
+                seed: renameSeed,
+                current: renamingController.titleOverride)
+        }
+        renamingController = nil
+
+        guard let window,
+              !(window.firstResponder is Ghostty.SurfaceView),
+              let focusedSurface = (window.windowController as? BaseTerminalController)?.focusedSurface
+        else { return }
+        window.makeFirstResponder(focusedSurface)
+    }
+
+    /// The title override to set when an edit that started from `seed` commits `text`.
+    ///
+    /// Committing the title unchanged keeps the current override, so a title that comes
+    /// from the terminal keeps following it rather than being frozen. An empty title
+    /// restores the default, like the native tab bar's editor.
+    nonisolated static func titleOverride(committing text: String, seed: String, current: String?) -> String? {
+        guard text != seed else { return current }
+        return text.isEmpty ? nil : text
     }
 
     func setColor(_ color: TerminalTabColor, for tab: Tab) {
@@ -255,7 +354,7 @@ final class TerminalTabSidebarModel: ObservableObject {
 
         menu.addItem(.separator())
         menu.addItem(menuItem("Rename Tab...", symbol: "pencil.line") { [weak self] in
-            self?.promptTitle(tab)
+            self?.rename(tab)
         })
 
         let paletteItem = NSMenuItem()
@@ -425,14 +524,24 @@ struct TerminalTabSidebar: View {
                 .padding(.horizontal, 6)
                 .frame(height: 40)
 
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(model.tabs) { tab in
-                            TerminalTabSidebarRow(model: model, tab: tab, isCompact: false)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(model.tabs) { tab in
+                                TerminalTabSidebarRow(
+                                    model: model,
+                                    tab: tab,
+                                    isCompact: false,
+                                    isRenaming: model.renamingTabID == tab.id)
+                            }
                         }
+                        .padding(.horizontal, 6)
+                        .padding(.bottom, 6)
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
+                    // Keep the row whose title is being edited in view.
+                    .onChange(of: model.renamingTabID) { id in
+                        if let id { proxy.scrollTo(id) }
+                    }
                 }
             }
         }
@@ -444,6 +553,8 @@ struct TerminalTabSidebar: View {
             systemName: "sidebar.left",
             label: isCollapsed ? "Show Tab Sidebar" : "Hide Tab Sidebar"
         ) {
+            // The rail has no room for a title editor.
+            model.finishRename(commit: true)
             isCollapsed.toggle()
         }
     }
@@ -570,6 +681,9 @@ private struct TerminalTabSidebarRow: View {
     let tab: TerminalTabSidebarModel.Tab
     let isCompact: Bool
 
+    /// Whether the tab's title is being edited in this row. Tiles in the rail never are.
+    var isRenaming = false
+
     @State private var isHovering = false
 
     var body: some View {
@@ -584,11 +698,21 @@ private struct TerminalTabSidebarRow: View {
                 fallback: Color.primary.opacity(0.14)
             )
             .contentShape(Capsule())
-            .onTapGesture { model.select(tab) }
+            .onTapGesture {
+                // While the title is being edited, clicks on the row belong to the editor.
+                guard !isRenaming else { return }
+                model.select(tab)
+            }
             .onHover { isHovering = $0 }
             .help(tab.title)
-            .overlay(TerminalTabSidebarMenuArea { model.contextMenu(for: tab) })
-            .accessibilityElement(children: .combine)
+            .overlay(TerminalTabSidebarClickArea(
+                tabID: tab.id,
+                isRenaming: isRenaming,
+                menu: { model.contextMenu(for: tab) },
+                onDoubleClick: { model.rename(tab) }))
+            // The editor has to stay reachable while the title is being edited.
+            .accessibilityElement(children: isRenaming ? .contain : .combine)
+            .accessibilityIdentifier("TerminalTabSidebarRow")
             .accessibilityLabel(tab.title)
             .accessibilityAddTraits(tab.isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { model.select(tab) }
@@ -639,11 +763,16 @@ private struct TerminalTabSidebarRow: View {
             }
             .frame(width: 22, height: 22)
 
-            Text(tab.title)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if isRenaming {
+                // The editor takes the room of the title and the space after it.
+                TerminalTabSidebarTitleEditor(model: model, tabID: tab.id)
+            } else {
+                Text(tab.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-            Spacer(minLength: 4)
+                Spacer(minLength: 4)
+            }
 
             if let keyEquivalent = tab.keyEquivalent {
                 Text(keyEquivalent)
@@ -657,36 +786,193 @@ private struct TerminalTabSidebarRow: View {
     }
 }
 
-/// Shows an AppKit menu when its area is right-clicked or control-clicked, and lets every
-/// other mouse event through to the SwiftUI views beneath it.
-private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
-    let menu: () -> NSMenu
+/// Edits a tab's title in its row with the rules of the native tab bar's editor: Return
+/// commits, Escape cancels, and losing focus commits.
+private struct TerminalTabSidebarTitleEditor: NSViewRepresentable {
+    let model: TerminalTabSidebarModel
+    let tabID: ObjectIdentifier
 
-    func makeNSView(context: Context) -> MenuAreaView {
-        let view = MenuAreaView()
-        view.menuProvider = menu
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model, tabID: tabID)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        // Configured like the native tab bar's editor. The text is only set here, because
+        // setting it on updates would throw away what is being typed.
+        let field = NSTextField(string: model.renameText)
+        field.delegate = context.coordinator
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.lineBreakMode = .byClipping
+        if let cell = field.cell as? NSTextFieldCell {
+            cell.wraps = false
+            cell.usesSingleLineMode = true
+            cell.isScrollable = true
+        }
+        field.font = model.titleFont ?? .systemFont(ofSize: 13)
+        field.setAccessibilityIdentifier("TerminalTabSidebarTitleEditor")
+
+        // Focus after insertion so AppKit has created the field editor for this text field.
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak field] in
+            guard let field, coordinator.isEditing, let window = field.window else { return }
+            window.makeFirstResponder(field)
+            field.currentEditor()?.selectAll(nil)
+        }
+
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
+        // Take the width the row offers rather than growing with the title.
+        CGSize(width: proposal.width ?? 0, height: nsView.intrinsicContentSize.height)
+    }
+
+    static func dismantleNSView(_ nsView: NSTextField, coordinator: Coordinator) {
+        nsView.delegate = nil
+
+        // The field can go away in the middle of an edit, such as when its row scrolls out
+        // of the lazy stack. Like losing focus, that commits. SwiftUI is updating its views
+        // here, so the model changes on the next turn of the main queue.
+        DispatchQueue.main.async {
+            coordinator.finish(commit: true)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        private let model: TerminalTabSidebarModel
+        private let tabID: ObjectIdentifier
+
+        init(model: TerminalTabSidebarModel, tabID: ObjectIdentifier) {
+            self.model = model
+            self.tabID = tabID
+        }
+
+        /// Whether this field's edit is still in progress. The field can end editing after
+        /// the edit is over, such as when it is removed because the edit finished.
+        var isEditing: Bool {
+            model.renamingTabID == tabID
+        }
+
+        func finish(commit: Bool) {
+            guard isEditing else { return }
+            model.finishRename(commit: commit)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                finish(commit: true)
+                return true
+
+            case #selector(NSResponder.cancelOperation(_:)):
+                finish(commit: false)
+                return true
+
+            default:
+                return false
+            }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard isEditing, let field = obj.object as? NSTextField else { return }
+            model.renameText = field.stringValue
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            finish(commit: true)
+        }
+    }
+}
+
+/// Handles the clicks on a tab in the sidebar that SwiftUI can't: a right-click or
+/// control-click shows an AppKit menu, and a double-click renames the tab. Every other
+/// mouse event goes through to the SwiftUI views beneath it.
+private struct TerminalTabSidebarClickArea: NSViewRepresentable {
+    let tabID: ObjectIdentifier
+    let isRenaming: Bool
+    let menu: () -> NSMenu
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> ClickAreaView {
+        let view = ClickAreaView()
+        updateNSView(view, context: context)
         return view
     }
 
-    func updateNSView(_ nsView: MenuAreaView, context: Context) {
+    func updateNSView(_ nsView: ClickAreaView, context: Context) {
+        nsView.tabID = tabID
+        nsView.isRenaming = isRenaming
         nsView.menuProvider = menu
+        nsView.onDoubleClick = onDoubleClick
     }
 
-    final class MenuAreaView: NSView {
+    final class ClickAreaView: NSView {
+        /// The tab whose row last took a single click, in any copy of the sidebar. The first
+        /// click of a double-click can select another tab, which shows that tab's window, so
+        /// the second click lands in that window's copy of the sidebar.
+        private static var lastClickedTabID: ObjectIdentifier?
+
+        var tabID: ObjectIdentifier?
+        var isRenaming = false
         var menuProvider: (() -> NSMenu)?
+        var onDoubleClick: (() -> Void)?
+
+        /// Whether this view kept the last mouse down from the row beneath, so it keeps the
+        /// mouse up too.
+        private var keptMouseDown = false
 
         override func hitTest(_ point: NSPoint) -> NSView? {
-            // Only claim the clicks that open a context menu. Everything else, such as
-            // selecting the tab or pressing its close button, belongs to the row beneath.
-            guard let event = NSApp.currentEvent else { return nil }
+            // While the title is being edited, every click belongs to the editor. Otherwise
+            // only claim the clicks handled here. Everything else, such as selecting the tab
+            // or pressing its close button, belongs to the row beneath.
+            guard !isRenaming, let event = NSApp.currentEvent else { return nil }
             switch event.type {
             case .rightMouseDown, .rightMouseUp:
                 return super.hitTest(point)
             case .leftMouseDown where event.modifierFlags.contains(.control):
                 return super.hitTest(point)
+            case .leftMouseDown where event.clickCount > 1:
+                // The rest of a double-click is handled here.
+                return super.hitTest(point)
+            case .leftMouseDown:
+                // The row selects the tab, but remember the tab in case this is the first
+                // click of a double-click.
+                if super.hitTest(point) != nil {
+                    Self.lastClickedTabID = tabID
+                }
+                return nil
             default:
                 return nil
             }
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            keptMouseDown = !event.modifierFlags.contains(.control)
+            guard keptMouseDown else {
+                super.mouseDown(with: event)
+                return
+            }
+
+            // Only rename the tab if the first click was on it too. If the tab under the
+            // mouse changed in between, such as when the first click closed a tab and the
+            // next one moved up, the click does nothing rather than select or close it.
+            if event.clickCount == 2, let tabID, Self.lastClickedTabID == tabID {
+                onDoubleClick?()
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard keptMouseDown else {
+                super.mouseUp(with: event)
+                return
+            }
+            keptMouseDown = false
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {

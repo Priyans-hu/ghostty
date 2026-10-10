@@ -622,6 +622,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return "\(equiv)"
     }
 
+    /// Starts editing the given tab's title in this window's tab sidebar. Returns false if
+    /// the window has no sidebar or it can't edit the title, such as when it is collapsed.
+    func beginTabSidebarRename(for tabWindow: NSWindow) -> Bool {
+        tabSidebarModel?.beginRename(for: tabWindow) ?? false
+    }
+
     private func fixTabBar() {
         // We do this to make sure that the tab bar will always re-composite. If we don't,
         // then the it will "drag" pieces of the background with it when a transparent
