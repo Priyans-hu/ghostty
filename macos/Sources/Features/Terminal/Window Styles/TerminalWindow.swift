@@ -240,7 +240,10 @@ class TerminalWindow: NSWindow {
 
     @discardableResult
     func beginInlineTabTitleEdit(for targetWindow: NSWindow) -> Bool {
-        tabTitleEditor.beginEditing(for: targetWindow)
+        // The tab sidebar hides the native tab bar, so an inline edit there would be
+        // invisible. Returning false makes callers prompt for the title instead.
+        guard !showsTabSidebar else { return false }
+        return tabTitleEditor.beginEditing(for: targetWindow)
     }
 
     @objc private func renameTabFromContextMenu(_ sender: NSMenuItem) {
