@@ -1110,7 +1110,19 @@ private struct TerminalTabSidebarRow: View {
             .onTapGesture {
                 // While the title is being edited, clicks on the row belong to the editor.
                 guard !isRenaming else { return }
-                model.select(tab)
+
+                // Both clicks of a double-click come here, and the second one renames the tab,
+                // but only if the first was on this tab too. It wasn't if the tab under the
+                // mouse changed in between, such as when the first click closed a tab and the
+                // next one moved up.
+                switch Self.clickCount {
+                case 1:
+                    model.select(tab)
+                case 2 where TerminalTabSidebarClickArea.ClickAreaView.lastClickedTabID == tab.id:
+                    model.rename(tab)
+                default:
+                    break
+                }
             }
             .onHover { isHovering = $0 }
             // Selecting another tab hides this window with the mouse still on the row, so
@@ -1126,7 +1138,6 @@ private struct TerminalTabSidebarRow: View {
                 tabID: tab.id,
                 isRenaming: isRenaming,
                 menu: { model.contextMenu(for: tab) },
-                onDoubleClick: { model.rename(tab) },
                 onMiddleClick: { model.close(tab) }))
             // The editor has to stay reachable while the title is being edited.
             .accessibilityElement(children: isRenaming ? .contain : .combine)
@@ -1138,6 +1149,13 @@ private struct TerminalTabSidebarRow: View {
 
     private var hoverFill: Color {
         Color.primary.opacity(!tab.isSelected && isHovering ? 0.08 : 0)
+    }
+
+    /// The click count of the left click being handled, such as 2 for the second click of a
+    /// double-click. It is 1 when no left click is being handled.
+    private static var clickCount: Int {
+        guard let event = NSApp.currentEvent, event.type == .leftMouseUp else { return 1 }
+        return event.clickCount
     }
 
     @ViewBuilder
@@ -1171,6 +1189,9 @@ private struct TerminalTabSidebarRow: View {
             ZStack {
                 if isHovering {
                     TerminalTabSidebarButton(systemName: "xmark", label: "Close Tab", kind: .close) {
+                        // A double-click closes one tab, not also the one that moves up into
+                        // its place.
+                        guard Self.clickCount == 1 else { return }
                         model.close(tab)
                     }
                 } else if let color = tab.color.displayColor {
@@ -1309,13 +1330,12 @@ private struct TerminalTabSidebarTitleEditor: NSViewRepresentable {
 }
 
 /// Handles the clicks on a tab in the sidebar that SwiftUI can't: a right-click or
-/// control-click shows an AppKit menu, a double-click renames the tab, and a middle click
-/// closes it. Every other mouse event goes through to the SwiftUI views beneath it.
+/// control-click shows an AppKit menu, and a middle click closes it. Every other mouse
+/// event goes through to the SwiftUI views beneath it.
 private struct TerminalTabSidebarClickArea: NSViewRepresentable {
     let tabID: ObjectIdentifier
     let isRenaming: Bool
     let menu: () -> NSMenu
-    let onDoubleClick: () -> Void
     let onMiddleClick: () -> Void
 
     func makeNSView(context: Context) -> ClickAreaView {
@@ -1328,25 +1348,20 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
         nsView.tabID = tabID
         nsView.isRenaming = isRenaming
         nsView.menuProvider = menu
-        nsView.onDoubleClick = onDoubleClick
         nsView.onMiddleClick = onMiddleClick
     }
 
     final class ClickAreaView: NSView {
-        /// The tab whose row last took a single click, in any copy of the sidebar. The first
-        /// click of a double-click can select another tab, which shows that tab's window, so
-        /// the second click lands in that window's copy of the sidebar.
-        private static var lastClickedTabID: ObjectIdentifier?
+        /// The tab whose row last took a single click, in any copy of the sidebar, so the row
+        /// can tell whether a double-click began on its tab. The first click of a double-click
+        /// can select another tab, which shows that tab's window, so the second click lands
+        /// in that window's copy of the sidebar.
+        private(set) static var lastClickedTabID: ObjectIdentifier?
 
         var tabID: ObjectIdentifier?
         var isRenaming = false
         var menuProvider: (() -> NSMenu)?
-        var onDoubleClick: (() -> Void)?
         var onMiddleClick: (() -> Void)?
-
-        /// Whether this view kept the last mouse down from the row beneath, so it keeps the
-        /// mouse up too.
-        private var keptMouseDown = false
 
         /// Whether a middle click started on this tab.
         private var middleClickStarted = false
@@ -1361,12 +1376,10 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
                 return super.hitTest(point)
             case .leftMouseDown where event.modifierFlags.contains(.control):
                 return super.hitTest(point)
-            case .leftMouseDown where event.clickCount > 1:
-                // The rest of a double-click is handled here.
-                return super.hitTest(point)
-            case .leftMouseDown:
-                // The row selects the tab, but remember the tab in case this is the first
-                // click of a double-click.
+            case .leftMouseDown where event.clickCount == 1:
+                // The row selects the tab, and renames it on the second click of a
+                // double-click, which AppKit sends to the view that took the first click
+                // anyway. Remember the tab in case this is that first click.
                 if super.hitTest(point) != nil {
                     Self.lastClickedTabID = tabID
                 }
@@ -1377,29 +1390,6 @@ private struct TerminalTabSidebarClickArea: NSViewRepresentable {
             default:
                 return nil
             }
-        }
-
-        override func mouseDown(with event: NSEvent) {
-            keptMouseDown = !event.modifierFlags.contains(.control)
-            guard keptMouseDown else {
-                super.mouseDown(with: event)
-                return
-            }
-
-            // Only rename the tab if the first click was on it too. If the tab under the
-            // mouse changed in between, such as when the first click closed a tab and the
-            // next one moved up, the click does nothing rather than select or close it.
-            if event.clickCount == 2, let tabID, Self.lastClickedTabID == tabID {
-                onDoubleClick?()
-            }
-        }
-
-        override func mouseUp(with event: NSEvent) {
-            guard keptMouseDown else {
-                super.mouseUp(with: event)
-                return
-            }
-            keptMouseDown = false
         }
 
         override func otherMouseDown(with event: NSEvent) {
