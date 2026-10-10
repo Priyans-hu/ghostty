@@ -374,7 +374,11 @@ final class TerminalTabSidebarModel: ObservableObject {
     /// an editor, so it prompts for the title instead.
     func rename(_ tab: Tab) {
         guard let tabWindow = tabWindow(for: tab) else { return }
-        if beginRename(for: tabWindow) { return }
+
+        // Edit in the copy of the sidebar on screen, which is the selected tab's. It isn't
+        // this one when the first click of a double-click selected another tab and the
+        // second click landed here before that tab's window was shown.
+        if (window as? TerminalWindow)?.beginInlineTabTitleEdit(for: tabWindow) == true { return }
 
         // This runs from menus and mouse events, so the prompt's sheet is shown once
         // they are done.
