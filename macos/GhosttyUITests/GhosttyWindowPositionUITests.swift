@@ -180,6 +180,7 @@ final class GhosttyWindowPositionUITests: GhosttyCustomConfigCase {
     @MainActor func testRestoredHidden() throws { try runRestoreTest(titlebarStyle: "hidden") }
     @MainActor func testRestoredTransparent() throws { try runRestoreTest(titlebarStyle: "transparent") }
     @MainActor func testRestoredTabs() throws { try runRestoreTest(titlebarStyle: "tabs") }
+    @MainActor func testRestoredVerticalTabs() throws { try runRestoreTest(titlebarStyle: "vertical-tabs") }
 
     // MARK: - Config overrides cached position/size
 
