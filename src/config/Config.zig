@@ -2191,8 +2191,9 @@ keybind: Keybinds = .{},
 ///   * `ghostty` - Use the background and foreground colors specified in the
 ///     Ghostty configuration. This is only supported on Linux builds.
 ///
-/// On macOS, if `macos-titlebar-style` is `tabs` or `transparent`, the window theme will be
-/// automatically set based on the luminosity of the terminal background color.
+/// On macOS, if `macos-titlebar-style` is `tabs`, `transparent`, or
+/// `vertical-tabs`, the window theme will be automatically set based on the
+/// luminosity of the terminal background color.
 /// This only applies to terminal windows. This setting will still apply to
 /// non-terminal windows within Ghostty.
 ///
@@ -3415,7 +3416,7 @@ keybind: Keybinds = .{},
 @"macos-window-buttons": MacWindowButtons = .visible,
 
 /// The style of the macOS titlebar. Available values are: "native",
-/// "transparent", "tabs", and "hidden".
+/// "transparent", "tabs", "vertical-tabs", and "hidden".
 ///
 /// The "native" style uses the native macOS titlebar with zero customization.
 /// The titlebar will match your window theme (see `window-theme`).
@@ -3440,9 +3441,12 @@ keybind: Keybinds = .{},
 /// been tested.
 ///
 /// The "vertical-tabs" style is the same as "transparent" but lists tabs in
-/// a sidebar on the left of the window instead of the native tab bar. The
-/// tabs are still native macOS window tabs, so tab keybinds, "Show All Tabs",
-/// and saved window state work the same. Available since: 1.4.0
+/// a sidebar on the left of the window instead of the native tab bar. Like
+/// the titlebar, the sidebar follows the window background color, including
+/// dynamic changes such as OSC 11. The tabs are still native macOS window
+/// tabs, so tab keybinds and "Show All Tabs" work the same. This style has
+/// no effect with `window-decoration = none`, which disables tabs.
+/// Available since: 1.4.0
 ///
 /// The "hidden" style hides the titlebar. Unlike `window-decoration = none`,
 /// however, it does not remove the frame from the window or cause it to have
