@@ -416,8 +416,10 @@ struct TerminalTabSidebarLayout<Content: View>: View {
     @AppStorage(TerminalTabSidebar.collapsedKey, store: .ghostty) private var isCollapsed = false
     @AppStorage(TerminalTabSidebar.widthKey, store: .ghostty) private var width = TerminalTabSidebar.defaultWidth
 
-    /// The sidebar width when the current resize drag began.
-    @State private var widthAtDragStart: Double?
+    /// The sidebar width while its divider is being dragged. The width is only saved once
+    /// the drag ends, so other windows and the other tabs of this one lay out once rather
+    /// than on every step of the drag.
+    @State private var dragWidth: Double?
 
     init(model: TerminalTabSidebarModel, @ViewBuilder content: () -> Content) {
         self.model = model
@@ -429,48 +431,128 @@ struct TerminalTabSidebarLayout<Content: View>: View {
             // The window's appearance already follows its background, so the sidebar's
             // light or dark content matches the titlebar without setting a color scheme.
             TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
-                .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
+                .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : expandedWidth)
                 .background(Color(nsColor: model.backgroundColor ?? .clear))
 
-            divider
+            Rectangle()
+                .fill(Color.primary.opacity(0.15))
+                .frame(width: TerminalTabSidebar.dividerWidth)
 
             content
         }
+        // The handle lies over the whole layout rather than the divider so that it is
+        // above the terminal's view, which it reaches over.
+        .overlay(alignment: .leading) {
+            if !isCollapsed {
+                resizeHandle
+            }
+        }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.15))
-            .frame(width: TerminalTabSidebar.dividerWidth)
-            .overlay {
-                if !isCollapsed {
-                    // A wider invisible strip so the divider is easy to grab.
-                    Color.clear
-                        .frame(width: 7)
-                        .contentShape(Rectangle())
-                        .gesture(resizeGesture)
-                        .onHover { isHovering in
-                            if isHovering {
-                                NSCursor.resizeLeftRight.push()
-                            } else {
-                                NSCursor.pop()
-                            }
-                        }
-                }
-            }
+    /// The width of the sidebar when it isn't collapsed.
+    private var expandedWidth: Double {
+        dragWidth ?? width
     }
 
-    private var resizeGesture: some Gesture {
-        DragGesture(minimumDistance: 1, coordinateSpace: .global)
-            .onChanged { value in
-                let start = widthAtDragStart ?? width
-                widthAtDragStart = start
-                let range = TerminalTabSidebar.widthRange
-                width = min(max(start + value.translation.width, range.lowerBound), range.upperBound)
+    private var resizeHandle: some View {
+        TerminalTabSidebarResizeHandle(
+            width: expandedWidth,
+            onResize: { dragWidth = $0 },
+            onResizeEnd: {
+                if let dragWidth { width = dragWidth }
+                dragWidth = nil
+            },
+            onReset: {
+                dragWidth = nil
+                width = TerminalTabSidebar.defaultWidth
+            })
+        .frame(width: TerminalTabSidebarResizeHandle.sidebarOverlap
+            + TerminalTabSidebar.dividerWidth
+            + TerminalTabSidebarResizeHandle.contentOverlap)
+        .offset(x: expandedWidth - TerminalTabSidebarResizeHandle.sidebarOverlap)
+    }
+}
+
+/// The area around the tab sidebar's divider that resizes the sidebar when dragged and
+/// resets its width when double-clicked. It is an AppKit view so that the resize cursor
+/// comes from a cursor rect, which goes away with the view when the sidebar collapses.
+private struct TerminalTabSidebarResizeHandle: NSViewRepresentable {
+    /// How far the handle reaches into the sidebar, beside the divider.
+    static let sidebarOverlap: Double = 6
+
+    /// How far the handle reaches over the terminal, beside the divider.
+    static let contentOverlap: Double = 4
+
+    /// The current width of the sidebar.
+    let width: Double
+    let onResize: (Double) -> Void
+    let onResizeEnd: () -> Void
+    let onReset: () -> Void
+
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ nsView: HandleView, context: Context) {
+        nsView.width = width
+        nsView.onResize = onResize
+        nsView.onResizeEnd = onResizeEnd
+        nsView.onReset = onReset
+    }
+
+    final class HandleView: NSView {
+        var width: Double = 0
+        var onResize: ((Double) -> Void)?
+        var onResizeEnd: (() -> Void)?
+        var onReset: (() -> Void)?
+
+        /// Where the drag in progress began, in window coordinates, and the sidebar width
+        /// then. The handle moves with the divider, so the drag is measured in the window.
+        private var dragStart: (x: CGFloat, width: Double)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .resizeLeftRight)
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            // Where the handle reaches over the terminal, the terminal's cursor rect
+            // overlaps this one, so don't leave the cursor to the overlapping rects.
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // Scrolling belongs to the sidebar's list or the terminal beneath.
+            guard NSApp.currentEvent?.type != .scrollWheel else { return nil }
+            return super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                dragStart = nil
+                onReset?()
+                return
             }
-            .onEnded { _ in
-                widthAtDragStart = nil
-            }
+
+            dragStart = (event.locationInWindow.x, width)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let dragStart else { return }
+
+            // The sidebar and the terminal share the window's content.
+            let width = dragStart.width + event.locationInWindow.x - dragStart.x
+            let availableWidth = window?.contentView?.bounds.width ?? .infinity
+            onResize?(TerminalTabSidebar.clampedWidth(width, availableWidth: availableWidth))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            dragStart = nil
+            onResizeEnd?()
+        }
     }
 }
 
@@ -482,6 +564,18 @@ struct TerminalTabSidebar: View {
     static let widthRange: ClosedRange<Double> = 120...400
     static let collapsedWidth: Double = 40
     static let dividerWidth: Double = 1
+
+    /// The narrowest that resizing the sidebar can make the terminal beside it.
+    static let minimumTerminalWidth: Double = 200
+
+    /// The width of a sidebar resized to `width` in a window whose content is
+    /// `availableWidth` wide. It stays within `widthRange` and leaves the terminal at least
+    /// `minimumTerminalWidth`, except in a window too narrow for both, where the sidebar
+    /// keeps its minimum width.
+    static func clampedWidth(_ width: Double, availableWidth: Double) -> Double {
+        let maximum = min(widthRange.upperBound, availableWidth - dividerWidth - minimumTerminalWidth)
+        return max(widthRange.lowerBound, min(width, maximum))
+    }
 
     /// The width the sidebar and its divider currently take out of a window's content.
     static var occupiedWidth: CGFloat {
