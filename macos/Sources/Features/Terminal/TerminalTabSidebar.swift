@@ -235,8 +235,8 @@ struct TerminalTabSidebarLayout<Content: View>: View {
     @ObservedObject var ghostty: Ghostty.App
     let content: Content
 
-    @AppStorage(TerminalTabSidebar.collapsedKey) private var isCollapsed = false
-    @AppStorage(TerminalTabSidebar.widthKey) private var width = TerminalTabSidebar.defaultWidth
+    @AppStorage(TerminalTabSidebar.collapsedKey, store: .ghostty) private var isCollapsed = false
+    @AppStorage(TerminalTabSidebar.widthKey, store: .ghostty) private var width = TerminalTabSidebar.defaultWidth
 
     /// The sidebar width when the current resize drag began.
     @State private var widthAtDragStart: Double?
@@ -307,7 +307,7 @@ struct TerminalTabSidebar: View {
 
     /// The width the sidebar and its divider currently take out of a window's content.
     static var occupiedWidth: CGFloat {
-        let defaults = UserDefaults.standard
+        let defaults = UserDefaults.ghostty
         if defaults.bool(forKey: collapsedKey) {
             return collapsedWidth + dividerWidth
         }
