@@ -141,8 +141,9 @@ final class TerminalTabSidebarModel: ObservableObject {
             self.isRefreshScheduled = false
 
             // Only the selected tab's copy of the sidebar is on screen. The others catch
-            // up when their window is shown.
-            guard self.window?.isVisible == true else { return }
+            // up when their window is shown. `isVisible` is true for every window in
+            // a tab group, so this asks the occlusion state instead.
+            guard self.window?.occlusionState.contains(.visible) == true else { return }
             self.refresh()
         }
     }
