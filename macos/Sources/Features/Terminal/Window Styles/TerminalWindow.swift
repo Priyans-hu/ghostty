@@ -322,6 +322,10 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidAppear() {
+        // The tab sidebar hides the native tab bar, including the reset zoom button
+        // in each tab, so windows with the sidebar keep the titlebar one.
+        guard !showsTabSidebar else { return }
+
         // Remove our reset zoom accessory. For some reason having a SwiftUI
         // titlebar accessory causes our content view scaling to be wrong.
         // Removing it fixes it, we just need to remember to add it again later.
