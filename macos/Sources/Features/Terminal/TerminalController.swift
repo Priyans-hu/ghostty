@@ -61,8 +61,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
-    /// The tabs listed by this window's vertical tab sidebar.
-    private let tabSidebarModel = TerminalTabSidebarModel()
+    /// The tabs listed by this window's vertical tab sidebar. This is only set for
+    /// windows that show the sidebar.
+    private var tabSidebarModel: TerminalTabSidebarModel?
 
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -1117,23 +1118,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Initialize our content view to the SwiftUI root, with the vertical
-        // tab sidebar beside the terminal.
-        tabSidebarModel.window = window
-        let container = TerminalViewContainer {
-            TerminalTabSidebarLayout(model: tabSidebarModel, ghostty: ghostty) {
+        let container: TerminalViewContainer
+        if (window as? TerminalWindow)?.showsTabSidebar == true {
+            // Initialize our content view to the SwiftUI root, with the vertical
+            // tab sidebar beside the terminal.
+            let model = TerminalTabSidebarModel()
+            model.window = window
+            tabSidebarModel = model
+            container = TerminalViewContainer {
+                TerminalTabSidebarLayout(model: model, ghostty: ghostty) {
+                    TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+                }
+            }
+
+            // The sidebar takes its width on top of the terminal's initial size.
+            container.initialContentSize = focusedSurface?.initialSize.map {
+                NSSize(width: $0.width + TerminalTabSidebar.occupiedWidth, height: $0.height)
+            }
+        } else {
+            // Initialize our content view to the SwiftUI root
+            container = TerminalViewContainer {
                 TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
             }
-        }
 
-        // Set the initial content size on the container so that
-        // intrinsicContentSize returns the correct value immediately,
-        // without waiting for @FocusedValue to propagate through the
-        // SwiftUI focus chain. A visible sidebar takes its width on top
-        // of the terminal's.
-        let sidebarWidth = (window as? TerminalWindow)?.showsTabSidebar == true ? TerminalTabSidebar.occupiedWidth : 0
-        container.initialContentSize = focusedSurface?.initialSize.map {
-            NSSize(width: $0.width + sidebarWidth, height: $0.height)
+            // Set the initial content size on the container so that
+            // intrinsicContentSize returns the correct value immediately,
+            // without waiting for @FocusedValue to propagate through the
+            // SwiftUI focus chain.
+            container.initialContentSize = focusedSurface?.initialSize
         }
 
         window.contentView = container

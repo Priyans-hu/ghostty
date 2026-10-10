@@ -53,6 +53,9 @@ class TerminalWindow: NSWindow {
 
     /// Whether the vertical tab sidebar replaces the native tab bar in this window
     /// (`macos-titlebar-style = vertical-tabs`). Fixed when the window is created.
+    ///
+    /// Windows without decorations never show it. They load the plain "Terminal" nib
+    /// and new tabs are refused, so there would be nothing to list but one tab.
     private(set) var showsTabSidebar = false
 
     /// Glass effect view for liquid glass background when transparency is enabled
@@ -114,7 +117,7 @@ class TerminalWindow: NSWindow {
 
         // Setup our initial config
         derivedConfig = .init(config)
-        showsTabSidebar = config.macosTitlebarStyle == .verticalTabs
+        showsTabSidebar = config.windowDecorations && config.macosTitlebarStyle == .verticalTabs
 
         // If there is a hardcoded title in the configuration, we set that
         // immediately. Future `set_title` apprt actions will override this

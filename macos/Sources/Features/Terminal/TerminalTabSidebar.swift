@@ -34,11 +34,6 @@ final class TerminalTabSidebarModel: ObservableObject {
         }
     }
 
-    /// Whether the window uses `macos-titlebar-style = vertical-tabs`.
-    var showsSidebar: Bool {
-        (window as? TerminalWindow)?.showsTabSidebar ?? false
-    }
-
     private var observer: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
 
@@ -254,14 +249,12 @@ struct TerminalTabSidebarLayout<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            if model.showsSidebar {
-                TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
-                    .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
-                    .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
-                    .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
+            TerminalTabSidebar(model: model, isCollapsed: $isCollapsed)
+                .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
+                .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
+                .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
 
-                divider
-            }
+            divider
 
             content
         }
