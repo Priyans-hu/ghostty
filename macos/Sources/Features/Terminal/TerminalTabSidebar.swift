@@ -276,7 +276,7 @@ final class TerminalTabSidebarModel: ObservableObject {
         handler: @escaping () -> Void
     ) -> NSMenuItem {
         let action = MenuAction(handler)
-        let item = NSMenuItem(title: title, action: #selector(MenuAction.perform(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: title, action: #selector(MenuAction.invoke(_:)), keyEquivalent: "")
         item.target = action
         // The item's target is weak, so the item itself keeps the action alive.
         item.representedObject = action
@@ -295,7 +295,9 @@ final class TerminalTabSidebarModel: ObservableObject {
             self.handler = handler
         }
 
-        @objc func perform(_ sender: Any?) {
+        // This can't be named `perform(_:)`. A selector for that resolves to
+        // NSObject's `performSelector:`, so choosing the item would do nothing.
+        @objc func invoke(_ sender: Any?) {
             handler()
         }
     }
