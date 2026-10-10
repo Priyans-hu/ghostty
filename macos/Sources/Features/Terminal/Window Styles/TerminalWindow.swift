@@ -263,6 +263,18 @@ class TerminalWindow: NSWindow {
         }
     }
 
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(toggleTabBar(_:)) where showsTabSidebar:
+            // The tab sidebar replaces the native tab bar, so there is nothing
+            // to show or hide.
+            return false
+
+        default:
+            return super.validateMenuItem(item)
+        }
+    }
+
     override func addTitlebarAccessoryViewController(_ childViewController: NSTitlebarAccessoryViewController) {
         super.addTitlebarAccessoryViewController(childViewController)
 

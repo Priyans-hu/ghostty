@@ -141,9 +141,13 @@ final class TerminalTabSidebarModel: ObservableObject {
     }
 
     /// The windows in our tab group in tab order. A window that isn't tabbed is its own only tab.
+    ///
+    /// This asks the tab group because `tabbedWindows` is nil whenever the window isn't
+    /// showing a tab bar. AppKit remembers View > Hide Tab Bar across windows, so that
+    /// would leave the sidebar with only our own tab.
     private var tabWindows: [NSWindow] {
         guard let window else { return [] }
-        return window.tabbedWindows ?? [window]
+        return window.tabGroup?.windows ?? [window]
     }
 
     func refresh() {
